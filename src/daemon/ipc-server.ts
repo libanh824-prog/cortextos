@@ -1,11 +1,96 @@
 import { createServer, Server, Socket } from 'net';
-import { existsSync, unlinkSync, chmodSync } from 'fs';
-import { resolve as pathResolve } from 'path';
-import type { IPCRequest, IPCResponse } from '../types/index.js';
+import { existsSync, unlinkSync, chmodSync, readFileSync } from 'fs';
+import { join, resolve as pathResolve } from 'path';
+import type { IPCRequest, IPCResponse, CronSummaryRow } from '../types/index.js';
 import { AgentManager } from './agent-manager.js';
 import { getIpcPath } from '../utils/paths.js';
+import { readCrons, getExecutionLog } from '../bus/crons.js';
+import { nextFireFromCron } from './cron-scheduler.js';
+import { parseDurationMs } from '../bus/cron-state.js';
 
 const WORKER_NAME_REGEX = /^[a-z0-9_-]+$/;
+
+// ---------------------------------------------------------------------------
+// list-all-crons helper — Subtask 4.1
+// ---------------------------------------------------------------------------
+
+/**
+ * Compute the next fire timestamp (ISO string) for a cron definition.
+ * Reuses the same parser logic as CronScheduler (nextFireFromCron + parseDurationMs)
+ * without duplicating the parser.
+ *
+ * @param schedule    - Interval shorthand or 5-field cron expression.
+ * @param lastFiredAt - ISO 8601 of last fire; if absent uses `now`.
+ * @param now         - Epoch ms for "now" (injectable for testing).
+ */
+export function computeNextFire(
+  schedule: string,
+  lastFiredAt: string | undefined,
+  now = Date.now(),
+): string {
+  const referenceMs = lastFiredAt ? new Date(lastFiredAt).getTime() : now;
+
+  const durationMs = parseDurationMs(schedule);
+  if (!isNaN(durationMs)) {
+    const next = referenceMs + durationMs;
+    // If next is still in the past (daemon was stopped for a long time), advance to now
+    return new Date(next <= now ? now + durationMs : next).toISOString();
+  }
+
+  // Try as a 5-field cron expression
+  const nextMs = nextFireFromCron(schedule, now);
+  if (!isNaN(nextMs)) {
+    return new Date(nextMs).toISOString();
+  }
+
+  // Unparseable schedule — return a sentinel so callers can detect it
+  return 'unknown';
+}
+
+/**
+ * Walk all enabled agents from enabled-agents.json, read each agent's crons.json
+ * and cron execution log, and return a combined summary array.
+ */
+function listAllCrons(): CronSummaryRow[] {
+  const ctxRoot = process.env.CTX_ROOT ?? process.cwd();
+  const enabledFile = join(ctxRoot, 'config', 'enabled-agents.json');
+
+  let enabledAgents: Record<string, { enabled?: boolean; org?: string }> = {};
+  if (existsSync(enabledFile)) {
+    try {
+      enabledAgents = JSON.parse(readFileSync(enabledFile, 'utf-8'));
+    } catch {
+      // corrupt — fall through with empty map
+    }
+  }
+
+  const rows: CronSummaryRow[] = [];
+  const now = Date.now();
+
+  for (const [agentName, entry] of Object.entries(enabledAgents)) {
+    if (entry.enabled === false) continue;
+
+    const org = entry.org ?? '';
+    const crons = readCrons(agentName);
+
+    for (const cron of crons) {
+      // Read the last execution log entry for this cron
+      const logEntries = getExecutionLog(agentName, cron.name, 1);
+      const lastEntry = logEntries.length > 0 ? logEntries[logEntries.length - 1] : null;
+
+      rows.push({
+        agent: agentName,
+        org,
+        cron,
+        lastFire: lastEntry?.ts ?? null,
+        lastStatus: lastEntry?.status ?? null,
+        nextFire: computeNextFire(cron.schedule, cron.last_fired_at, now),
+      });
+    }
+  }
+
+  return rows;
+}
 
 /**
  * IPC server for CLI <-> daemon communication.
@@ -271,6 +356,27 @@ export class IPCServer {
             response = ok
               ? { success: true, data: `Fired cron '${cronName}' for ${agentToFire}` }
               : { success: false, error: `Agent ${agentToFire} not found or not running` };
+          }
+          break;
+        }
+
+        case 'list-all-crons': {
+          response = {
+            success: true,
+            data: listAllCrons(),
+          };
+          break;
+        }
+
+        case 'list-cron-executions': {
+          const execAgent = request.agent;
+          const execCronName = request.data?.cronName as string | undefined;
+          const execLimit = typeof request.data?.limit === 'number' ? request.data.limit : 50;
+          if (!execAgent) {
+            response = { success: false, error: 'list-cron-executions requires agent name' };
+          } else {
+            const entries = getExecutionLog(execAgent, execCronName, execLimit);
+            response = { success: true, data: entries };
           }
           break;
         }

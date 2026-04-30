@@ -571,7 +571,41 @@ export type IPCCommandType =
   | 'inject-worker'
   | 'reload-crons'
   | 'fire-cron'
-  | 'inject-agent';
+  | 'inject-agent'
+  | 'list-all-crons'
+  | 'list-cron-executions';
+
+// ---------------------------------------------------------------------------
+// list-all-crons response shape — Subtask 4.1
+// ---------------------------------------------------------------------------
+
+/**
+ * One row returned by the `list-all-crons` IPC command.
+ * Combines the cron definition with runtime state (last fire, next fire, status).
+ */
+export interface CronSummaryRow {
+  /** Agent that owns this cron. */
+  agent: string;
+  /** Org the agent belongs to (from enabled-agents.json). */
+  org: string;
+  /** Full cron definition as stored in crons.json. */
+  cron: CronDefinition;
+  /**
+   * ISO 8601 timestamp of the most recent fire attempt.
+   * Null when the cron has never fired (no execution log entry).
+   */
+  lastFire: string | null;
+  /**
+   * Outcome of the most recent execution log entry.
+   * Null when the cron has never fired.
+   */
+  lastStatus: 'fired' | 'retried' | 'failed' | null;
+  /**
+   * ISO 8601 timestamp of the next scheduled fire.
+   * Computed from the cron's schedule + last_fired_at (or now).
+   */
+  nextFire: string;
+}
 
 export interface IPCRequest {
   type: IPCCommandType;

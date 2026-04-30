@@ -3,7 +3,7 @@ import { homedir } from 'os';
 import { join } from 'path';
 
 export interface IPCRequest {
-  type: 'status' | 'start-agent' | 'stop-agent' | 'restart-agent' | 'wake' | 'list-agents';
+  type: 'status' | 'start-agent' | 'stop-agent' | 'restart-agent' | 'wake' | 'list-agents' | 'list-all-crons' | 'list-cron-executions' | 'reload-crons' | 'fire-cron' | 'inject-agent';
   agent?: string;
   data?: Record<string, unknown>;
 }
