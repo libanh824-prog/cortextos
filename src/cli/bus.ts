@@ -2128,6 +2128,83 @@ busCommand
     console.log('');
   });
 
+// ---------------------------------------------------------------------------
+// migrate-crons — Subtask 2.2: Manual one-shot migration command
+// ---------------------------------------------------------------------------
+
+busCommand
+  .command('migrate-crons')
+  .description('Migrate crons from config.json to crons.json for one or all agents')
+  .argument('[agent]', 'Agent name to migrate (omit to migrate all enabled agents)')
+  .option('--force', 'Re-run migration even if the marker file already exists')
+  .action(async (agentArg: string | undefined, opts: { force?: boolean }) => {
+    const { migrateCronsForAgent: migrateSingle, migrateAllAgents: migrateAll } = await import('../daemon/cron-migration.js');
+    const env = resolveEnv();
+    const ctxRoot = env.ctxRoot;
+    const frameworkRoot = env.frameworkRoot || process.cwd();
+
+    const log = (msg: string) => console.log(msg);
+    const migOpts = { force: opts.force ?? false, log };
+
+    if (agentArg) {
+      // Single-agent migration
+      try { validateAgentName(agentArg); } catch (err) { console.error(String(err)); process.exit(1); }
+
+      // Resolve config.json path via filesystem scan
+      const { existsSync: fsExists, readdirSync: fsReaddir } = require('fs') as typeof import('fs');
+      const orgsDir = join(frameworkRoot, 'orgs');
+      let configPath: string | undefined;
+      if (fsExists(orgsDir)) {
+        try {
+          for (const org of fsReaddir(orgsDir, { withFileTypes: true }).filter(d => d.isDirectory()).map(d => d.name)) {
+            const candidate = join(orgsDir, org, 'agents', agentArg, 'config.json');
+            if (fsExists(candidate)) { configPath = candidate; break; }
+          }
+        } catch { /* ignore scan errors */ }
+      }
+
+      if (!configPath) {
+        console.error(`Error: agent '${agentArg}' not found in framework. Check orgs/*/agents/ directory.`);
+        process.exit(1);
+      }
+
+      const result = migrateSingle(agentArg, configPath, ctxRoot, migOpts);
+
+      switch (result.status) {
+        case 'skipped-already-migrated':
+          console.log(`Skipped ${agentArg}: already migrated (use --force to re-run)`);
+          break;
+        case 'no-config':
+          console.log(`Skipped ${agentArg}: no config.json found`);
+          break;
+        case 'no-crons':
+          console.log(`Skipped ${agentArg}: config.json has no crons — empty crons.json written`);
+          break;
+        case 'migrated':
+          console.log(
+            `Migrated ${agentArg}: ${result.cronsMigrated} cron(s) migrated` +
+            (result.cronsSkipped?.length ? `, ${result.cronsSkipped.length} skipped (${result.cronsSkipped.join(', ')})` : '')
+          );
+          break;
+      }
+    } else {
+      // All-agents migration
+      const summary = migrateAll(frameworkRoot, ctxRoot, migOpts);
+
+      const migrated = summary.results.filter(r => r.status === 'migrated').length;
+      const skippedAlready = summary.results.filter(r => r.status === 'skipped-already-migrated').length;
+      const noConfig = summary.results.filter(r => r.status === 'no-config').length;
+      const noCrons = summary.results.filter(r => r.status === 'no-crons').length;
+
+      console.log(`\nMigration summary:`);
+      console.log(`  Agents processed    : ${summary.processed}`);
+      console.log(`  Agents migrated     : ${migrated} (${summary.totalCronsMigrated} crons)`);
+      console.log(`  Already migrated    : ${skippedAlready}`);
+      console.log(`  No config.json      : ${noConfig}`);
+      console.log(`  No crons in config  : ${noCrons}`);
+    }
+  });
+
 busCommand
   .command('hook-context-status')
   .description('StatusLine hook: writes context window % to state/context_status.json')

@@ -5,6 +5,7 @@ import { AgentProcess } from './agent-process.js';
 import { WorkerProcess } from './worker-process.js';
 import { FastChecker } from './fast-checker.js';
 import { CronScheduler } from './cron-scheduler.js';
+import { migrateCronsForAgent } from './cron-migration.js';
 import type { CronDefinition } from '../types/index.js';
 import { TelegramAPI } from '../telegram/api.js';
 import { TelegramPoller } from '../telegram/poller.js';
@@ -271,6 +272,14 @@ export class AgentManager {
 
     // Start agent
     await agentProcess.start();
+
+    // Subtask 2.2: Auto-migrate crons from config.json → crons.json before
+    // starting the scheduler, so the scheduler always has a populated crons.json
+    // to read from.  The migration is idempotent (marker file prevents re-runs).
+    const configJsonPath = join(agentDir, 'config.json');
+    migrateCronsForAgent(name, configJsonPath, this.ctxRoot, {
+      log: (msg) => log(`[migration] ${msg}`),
+    });
 
     // Wire daemon-level CronScheduler for this agent.
     // The scheduler reads crons.json, fires crons, and injects prompts into
