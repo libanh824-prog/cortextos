@@ -4,6 +4,8 @@ import type { AgentConfig, AgentStatus, CtxEnv, BusPaths, WorkerStatus, Telegram
 import { AgentProcess } from './agent-process.js';
 import { WorkerProcess } from './worker-process.js';
 import { FastChecker } from './fast-checker.js';
+import { CronScheduler } from './cron-scheduler.js';
+import type { CronDefinition } from '../types/index.js';
 import { TelegramAPI } from '../telegram/api.js';
 import { TelegramPoller } from '../telegram/poller.js';
 import { resolvePaths } from '../utils/paths.js';
@@ -21,6 +23,8 @@ type LogFn = (msg: string) => void;
 export class AgentManager {
   private agents: Map<string, { process: AgentProcess; checker: FastChecker; poller?: TelegramPoller; activityPoller?: TelegramPoller }> = new Map();
   private workers: Map<string, WorkerProcess> = new Map();
+  /** Daemon-level cron scheduler registry: one CronScheduler per enabled agent. */
+  private cronSchedulers: Map<string, CronScheduler> = new Map();
   // Tracks agents that received a start request while still stopping.
   // stopAgent() honors these after cleanup completes so restart-all is race-free.
   private pendingRestarts: Set<string> = new Set();
@@ -267,6 +271,12 @@ export class AgentManager {
 
     // Start agent
     await agentProcess.start();
+
+    // Wire daemon-level CronScheduler for this agent.
+    // The scheduler reads crons.json, fires crons, and injects prompts into
+    // the agent PTY via injectAgent().  This is the Phase 2 daemon-managed
+    // external cron system — agents no longer need to call CronCreate on boot.
+    this.startAgentCronScheduler(name);
 
     // Schedule background cron verification: waits for the agent to finish
     // its startup turn (idle flag), then injects a prompt to verify CronList
@@ -561,6 +571,13 @@ export class AgentManager {
     await entry.process.stop();
     this.agents.delete(name);
 
+    // Stop and remove the agent's cron scheduler (if one was wired)
+    const scheduler = this.cronSchedulers.get(name);
+    if (scheduler) {
+      scheduler.stop();
+      this.cronSchedulers.delete(name);
+    }
+
     // BUG-031: honor any restart that was queued while we were stopping.
     // After PR #11 (BUG-011 fix) this branch should never fire — see the
     // matching warning comment in startAgent(). The honor logic is preserved
@@ -670,6 +687,14 @@ export class AgentManager {
     return [...this.agents.keys()];
   }
 
+  /**
+   * Return the CronScheduler for a given agent (for testing / introspection).
+   * Returns undefined if no scheduler is running for that agent.
+   */
+  getCronScheduler(agentName: string): CronScheduler | undefined {
+    return this.cronSchedulers.get(agentName);
+  }
+
   // --- Worker management ---
 
   /**
@@ -747,17 +772,74 @@ export class AgentManager {
 
   /**
    * Signal the CronScheduler for an agent to re-read crons.json.
-   * Since the scheduler runs inside the daemon singleton the actual reload is
-   * handled by the AgentProcess itself whenever it next ticks — writing
-   * crons.json atomically is sufficient for the scheduler to pick up the change.
-   * This method is a no-op hook for forward-compatibility with future in-process
-   * scheduler wiring; callers should treat `true` as "acknowledged".
+   *
+   * Called by the IPC server after a `bus add-cron` / `bus remove-cron` write so
+   * the daemon-level scheduler picks up the new definition without waiting for
+   * the next 30 s tick.  Returns true if the agent is known and a scheduler
+   * is running for it; false if the agent is not running (caller can retry or
+   * wait for the next daemon boot scan).
    */
   reloadCrons(agentName: string): boolean {
-    // The CronScheduler polls crons.json on each 30s tick so the write from
-    // the CLI command is the real signal. Returning true confirms the agent
-    // is known to this daemon instance (or was at last check).
+    const scheduler = this.cronSchedulers.get(agentName);
+    if (scheduler) {
+      scheduler.reload();
+      console.log(`[agent-manager] Cron scheduler reloaded for ${agentName}`);
+      return true;
+    }
+    // Agent known but no scheduler yet (e.g. Hermes runtime or no crons.json)
     return this.agents.has(agentName);
+  }
+
+  /**
+   * Wire a daemon-level CronScheduler for the named agent.
+   *
+   * The scheduler reads `crons.json` (via `readCrons()`), computes fire times,
+   * and on each tick injects the cron's prompt text directly into the agent PTY
+   * via `injectAgent()`.  The fire callback builds the same injected text that
+   * a Claude-Code `CronCreate` callback would emit so the agent's session sees
+   * a normal-looking cron-fire message and handles it with existing skill code.
+   *
+   * Hermes agents manage their own cron system natively — skip them here.
+   * If crons.json is absent or empty the scheduler starts but has nothing to do;
+   * it will pick up new entries on the next `reloadCrons()` call.
+   */
+  private startAgentCronScheduler(agentName: string): void {
+    // Skip if already running (idempotent — e.g. called twice on fast restart)
+    if (this.cronSchedulers.has(agentName)) {
+      console.log(`[agent-manager] Cron scheduler already running for ${agentName} — skipped`);
+      return;
+    }
+
+    const entry = this.agents.get(agentName);
+    if (!entry) return;
+
+    // Hermes manages its own cron scheduling — don't double-schedule
+    if (entry.process['config']?.runtime === 'hermes') {
+      console.log(`[daemon] Skipping external cron scheduler for Hermes agent "${agentName}"`);
+      return;
+    }
+
+    const onFire = async (cron: CronDefinition): Promise<void> => {
+      const prompt = cron.prompt ?? `[cron] ${cron.name} fired`;
+      // Build the same injection format the agent's session expects from a fired cron
+      const injection = `[CRON FIRED] ${cron.name}: ${prompt}`;
+      const injected = this.injectAgent(agentName, injection);
+      if (!injected) {
+        throw new Error(`injectAgent returned false for agent "${agentName}" — agent may not be running`);
+      }
+    };
+
+    const scheduler = new CronScheduler({
+      agentName,
+      onFire,
+      logger: (msg) => console.log(`[daemon] ${msg}`),
+    });
+
+    scheduler.start();
+    this.cronSchedulers.set(agentName, scheduler);
+
+    const count = scheduler.getNextFireTimes().length;
+    console.log(`[daemon] Loaded ${count} external cron(s) for agent "${agentName}" from crons.json`);
   }
 
   /**
