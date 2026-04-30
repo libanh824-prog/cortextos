@@ -139,18 +139,22 @@ The orchestrator has 5 built-in crons. Set them all up now.
 
 ### Step 11: Set up core crons
 
-Check for existing crons first (run CronList - avoid duplicates).
+All crons are daemon-managed and survive restarts automatically. Use `cortextos bus add-cron` — do NOT use `/loop` or CronCreate for persistent scheduling.
 
-**Interval-based crons** - create via `/loop`:
-
-```
-/loop 4h Read HEARTBEAT.md and follow its instructions. Update your heartbeat, check inbox, review agent health via cortextos bus read-all-heartbeats, and work on coordination tasks.
-```
-```
-/loop 2h Check for pending approvals: cortextos bus list-approvals --format json. Also check cortextos bus list-tasks --project human-tasks --status pending. For any pending approval or human task older than 1h, send user a Telegram reminder.
+Check for existing crons first:
+```bash
+cortextos bus list-crons $CTX_AGENT_NAME
 ```
 
-**Time-anchored crons** - compute from context.json and create via CronCreate:
+**Interval-based crons:**
+
+```bash
+cortextos bus add-cron $CTX_AGENT_NAME heartbeat 4h Read HEARTBEAT.md and follow its instructions. Update your heartbeat, check inbox, review agent health via cortextos bus read-all-heartbeats, and work on coordination tasks.
+
+cortextos bus add-cron $CTX_AGENT_NAME approval-sweep 2h Check for pending approvals: cortextos bus list-approvals --format json. Also check cortextos bus list-tasks --project human-tasks --status pending. For any pending approval or human task older than 1h, send user a Telegram reminder.
+```
+
+**Time-anchored crons** — compute hours from context.json, then register:
 
 ```bash
 # DAY_START and DAY_END were read from context.json in Step 2
@@ -159,25 +163,17 @@ EVENING_HOUR=$(echo "$DAY_END" | cut -d: -f1 | sed 's/^0*//')
 MORNING_HOUR=${MORNING_HOUR:-8}
 EVENING_HOUR=${EVENING_HOUR:-18}
 echo "Morning review: ${MORNING_HOUR}:00 | Evening review: ${EVENING_HOUR}:00"
+
+cortextos bus add-cron $CTX_AGENT_NAME morning-review "0 ${MORNING_HOUR} * * *" Read .claude/skills/morning-review/SKILL.md and execute the full morning review workflow. Include goal cascade from .claude/skills/goal-management/SKILL.md.
+
+cortextos bus add-cron $CTX_AGENT_NAME evening-review "0 ${EVENING_HOUR} * * *" Read .claude/skills/evening-review/SKILL.md and execute the full evening review workflow. Summarize the day, propose overnight tasks, queue nighttime work.
+
+cortextos bus add-cron $CTX_AGENT_NAME weekly-review "0 ${MORNING_HOUR} * * 0" Read .claude/skills/weekly-review/SKILL.md and run the full weekly review. Review all agent outputs, evaluate performance, plan next week.
 ```
 
-Use CronCreate (not /loop) for the three time-anchored crons:
-- Morning review: `{cron: "0 {MORNING_HOUR} * * *", prompt: "Read .claude/skills/morning-review/SKILL.md and execute the full morning review workflow. Include goal cascade from .claude/skills/goal-management/SKILL.md.", recurring: true}`
-- Evening review: `{cron: "0 {EVENING_HOUR} * * *", prompt: "Read .claude/skills/evening-review/SKILL.md and execute the full evening review workflow. Summarize the day, propose overnight tasks, queue nighttime work.", recurring: true}`
-- Weekly review: `{cron: "0 {MORNING_HOUR} * * 0", prompt: "Read .claude/skills/weekly-review/SKILL.md and run the full weekly review. Review all agent outputs, evaluate performance, plan next week.", recurring: true}`
-
-After creating all 5 crons, update config.json with the computed cron expressions:
-
+Verify all 5 crons are registered:
 ```bash
-jq --arg mc "0 ${MORNING_HOUR} * * *" \
-  --arg ec "0 ${EVENING_HOUR} * * *" \
-  --arg wc "0 ${MORNING_HOUR} * * 0" \
-   '.crons = (.crons | map(
-     if .name == "morning-review" then . + {"cron": $mc} | del(.interval)
-     elif .name == "evening-review" then . + {"cron": $ec} | del(.interval)
-     elif .name == "weekly-review" then . + {"cron": $wc} | del(.interval)
-     else . end
-   ))' config.json > /tmp/config.tmp && mv /tmp/config.tmp config.json
+cortextos bus list-crons $CTX_AGENT_NAME
 ```
 
 ### Step 12: Write working hours, communication style, and autonomy to bootstrap files
