@@ -576,7 +576,8 @@ export type IPCCommandType =
   | 'list-cron-executions'
   | 'add-cron'
   | 'update-cron'
-  | 'remove-cron';
+  | 'remove-cron'
+  | 'fleet-health';
 
 // ---------------------------------------------------------------------------
 // Execution log pagination response — Subtask 4.3
@@ -623,6 +624,51 @@ export interface CronSummaryRow {
    * Computed from the cron's schedule + last_fired_at (or now).
    */
   nextFire: string;
+}
+
+// ---------------------------------------------------------------------------
+// Fleet Health — Subtask 4.4
+// ---------------------------------------------------------------------------
+
+export type CronHealthState = 'healthy' | 'warning' | 'failure' | 'never-fired';
+
+/** Health record for a single cron, returned by the fleet-health IPC command. */
+export interface CronHealthRow {
+  agent: string;
+  org: string;
+  cronName: string;
+  state: CronHealthState;
+  reason: string;
+  lastFire: number | null;
+  expectedIntervalMs: number;
+  gapMs: number | null;
+  successRate24h: number;
+  firesLast24h: number;
+  nextFire: string;
+}
+
+/** Per-agent breakdown in the fleet-health summary. */
+export interface AgentHealthSummary {
+  agent: string;
+  org: string;
+  total: number;
+  healthy: number;
+  warning: number;
+  failure: number;
+  neverFired: number;
+}
+
+/** Full response returned by the fleet-health IPC command. */
+export interface FleetHealthResponse {
+  rows: CronHealthRow[];
+  summary: {
+    total: number;
+    healthy: number;
+    warning: number;
+    failure: number;
+    neverFired: number;
+    agents: Record<string, AgentHealthSummary>;
+  };
 }
 
 export interface IPCRequest {

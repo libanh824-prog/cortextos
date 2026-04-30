@@ -4,6 +4,48 @@ import { join } from 'path';
 
 export type ExecutionLogStatusFilter = 'all' | 'success' | 'failure';
 
+// ---------------------------------------------------------------------------
+// Fleet Health types (Subtask 4.4)
+// ---------------------------------------------------------------------------
+
+export type CronHealthState = 'healthy' | 'warning' | 'failure' | 'never-fired';
+
+export interface CronHealthRow {
+  agent: string;
+  org: string;
+  cronName: string;
+  state: CronHealthState;
+  reason: string;
+  lastFire: number | null;
+  expectedIntervalMs: number;
+  gapMs: number | null;
+  successRate24h: number;
+  firesLast24h: number;
+  nextFire: string;
+}
+
+export interface AgentHealthSummary {
+  agent: string;
+  org: string;
+  total: number;
+  healthy: number;
+  warning: number;
+  failure: number;
+  neverFired: number;
+}
+
+export interface FleetHealthResponse {
+  rows: CronHealthRow[];
+  summary: {
+    total: number;
+    healthy: number;
+    warning: number;
+    failure: number;
+    neverFired: number;
+    agents: Record<string, AgentHealthSummary>;
+  };
+}
+
 export interface CronExecutionLogEntry {
   ts: string;
   cron: string;
@@ -35,7 +77,8 @@ export interface IPCRequest {
     | 'inject-agent'
     | 'add-cron'
     | 'update-cron'
-    | 'remove-cron';
+    | 'remove-cron'
+    | 'fleet-health';
   agent?: string;
   data?: Record<string, unknown>;
 }

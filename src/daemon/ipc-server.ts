@@ -4,10 +4,11 @@ import { join, resolve as pathResolve } from 'path';
 import type { IPCRequest, IPCResponse, CronSummaryRow, CronDefinition } from '../types/index.js';
 import { AgentManager } from './agent-manager.js';
 import { getIpcPath } from '../utils/paths.js';
-import { readCrons, getExecutionLogPage, addCron, updateCron, removeCron } from '../bus/crons.js';
+import { readCrons, getExecutionLog, getExecutionLogPage, addCron, updateCron, removeCron } from '../bus/crons.js';
 import type { ExecutionLogStatusFilter } from '../bus/crons.js';
 import { nextFireFromCron } from './cron-scheduler.js';
 import { parseDurationMs } from '../bus/cron-state.js';
+import { computeHealth, aggregateFleetHealth } from '../utils/cron-health.js';
 
 const WORKER_NAME_REGEX = /^[a-z0-9_-]+$/;
 
@@ -91,6 +92,90 @@ function listAllCrons(): CronSummaryRow[] {
   }
 
   return rows;
+}
+
+// ---------------------------------------------------------------------------
+// fleet-health handler — Subtask 4.4
+// ---------------------------------------------------------------------------
+
+interface FleetHealthCacheEntry {
+  result: ReturnType<typeof aggregateFleetHealth>;
+  expiresAt: number;
+}
+
+/** 30-second in-process cache to avoid hammering disk on rapid dashboard polls. */
+let _fleetHealthCache: FleetHealthCacheEntry | null = null;
+const FLEET_HEALTH_CACHE_TTL_MS = 30_000;
+
+/**
+ * Compute fleet health across all enabled agents.
+ * Walks crons.json + last-24h execution log for each agent and cron.
+ * Result is cached for 30 seconds.
+ *
+ * @param agentFilter - Optional agent name to restrict results to.
+ * @param nowMs       - Epoch ms for "now" (injectable for testing).
+ */
+export function computeFleetHealth(
+  agentFilter?: string,
+  nowMs = Date.now(),
+): ReturnType<typeof aggregateFleetHealth> {
+  // Check cache (skip when agentFilter is set — filtered views don't cache)
+  if (!agentFilter && _fleetHealthCache && nowMs < _fleetHealthCache.expiresAt) {
+    return _fleetHealthCache.result;
+  }
+
+  const ctxRoot = process.env.CTX_ROOT ?? process.cwd();
+  const enabledFile = join(ctxRoot, 'config', 'enabled-agents.json');
+
+  let enabledAgents: Record<string, { enabled?: boolean; org?: string }> = {};
+  if (existsSync(enabledFile)) {
+    try {
+      enabledAgents = JSON.parse(readFileSync(enabledFile, 'utf-8'));
+    } catch {
+      // corrupt — continue with empty
+    }
+  }
+
+  const cutoff24h = nowMs - 24 * 60 * 60 * 1000;
+  const rows = listAllCrons();
+
+  // Build per-cron execution lists for the last 24h in one pass per agent
+  // to avoid reading the log file once per cron.
+  const execMap = new Map<string, typeof rows[0]['cron'] extends infer _ ? ReturnType<typeof getExecutionLog> : never>();
+
+  // Pre-read execution logs per agent
+  const agentsWithCrons = new Set(rows.map(r => r.agent));
+  for (const agentName of agentsWithCrons) {
+    const allEntries = getExecutionLog(agentName, undefined, 0); // all entries
+    for (const entry of allEntries) {
+      if (new Date(entry.ts).getTime() < cutoff24h) continue;
+      const key = `${agentName}::${entry.cron}`;
+      if (!execMap.has(key)) execMap.set(key, []);
+      execMap.get(key)!.push(entry);
+    }
+  }
+
+  const healthRows = rows
+    .filter(r => !agentFilter || r.agent === agentFilter)
+    .map(r => {
+      const key = `${r.agent}::${r.cron.name}`;
+      const last24h = execMap.get(key) ?? [];
+      return computeHealth(r, last24h, nowMs);
+    });
+
+  const result = aggregateFleetHealth(healthRows);
+
+  // Cache only unfiltered results
+  if (!agentFilter) {
+    _fleetHealthCache = { result, expiresAt: nowMs + FLEET_HEALTH_CACHE_TTL_MS };
+  }
+
+  return result;
+}
+
+/** Invalidate the fleet-health cache (call after mutations). */
+export function invalidateFleetHealthCache(): void {
+  _fleetHealthCache = null;
 }
 
 // ---------------------------------------------------------------------------
@@ -556,6 +641,15 @@ export class IPCServer {
           response = {
             success: true,
             data: listAllCrons(),
+          };
+          break;
+        }
+
+        case 'fleet-health': {
+          const agentFilter = request.agent ?? (request.data?.agent as string | undefined);
+          response = {
+            success: true,
+            data: computeFleetHealth(agentFilter),
           };
           break;
         }

@@ -23,6 +23,11 @@ import {
   IconSearch,
   IconFilter,
   IconExternalLink,
+  IconCircleCheck,
+  IconAlertTriangle,
+  IconCircleX,
+  IconCircleDashed,
+  IconArrowRight,
 } from '@tabler/icons-react';
 import { formatRelative, formatSchedule } from '@/lib/cron-utils';
 
@@ -69,6 +74,15 @@ interface AgentCrons {
   crons: Cron[];
   loading: boolean;
   error: string | null;
+}
+
+// Fleet health summary shape (Subtask 4.4)
+interface FleetHealthSummary {
+  total: number;
+  healthy: number;
+  warning: number;
+  failure: number;
+  neverFired: number;
 }
 
 // ---------------------------------------------------------------------------
@@ -127,6 +141,10 @@ export default function WorkflowsPage() {
   const router = useRouter();
   const { currentOrg } = useOrg();
 
+  // ── Fleet health summary (from /api/workflows/health) ─────────────────────
+  const [fleetHealth, setFleetHealth] = useState<FleetHealthSummary | null>(null);
+  const [healthLoading, setHealthLoading] = useState(true);
+
   // ── Cron-status data (from /api/workflows/crons) ──────────────────────────
   const [cronRows, setCronRows] = useState<CronSummaryRow[]>([]);
   const [statusLoading, setStatusLoading] = useState(true);
@@ -153,6 +171,24 @@ export default function WorkflowsPage() {
 
   // Edit cron form state
   const [editCron, setEditCron] = useState<Cron>({ name: '', interval: '', prompt: '' });
+
+  // ── Fetch fleet health summary ─────────────────────────────────────────────
+  const fetchFleetHealth = useCallback(async () => {
+    setHealthLoading(true);
+    try {
+      const res = await fetch('/api/workflows/health');
+      if (res.ok) {
+        const data = await res.json();
+        if (data && typeof data.summary === 'object') {
+          setFleetHealth(data.summary as FleetHealthSummary);
+        }
+      }
+    } catch (err) {
+      console.error('[workflows] Failed to fetch fleet health:', err);
+    } finally {
+      setHealthLoading(false);
+    }
+  }, []);
 
   // ── Fetch cron status rows (list-all-crons via API) ────────────────────────
   const fetchCronStatus = useCallback(async () => {
@@ -241,6 +277,7 @@ export default function WorkflowsPage() {
   useEffect(() => {
     fetchAll();
     fetchCronStatus();
+    fetchFleetHealth();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -361,6 +398,7 @@ export default function WorkflowsPage() {
   const handleRefresh = () => {
     fetchAll();
     fetchCronStatus();
+    fetchFleetHealth();
   };
 
   // ── Render ─────────────────────────────────────────────────────────────────
@@ -392,6 +430,77 @@ export default function WorkflowsPage() {
           </button>
         </div>
       </div>
+
+      {/* ── Fleet Health Panel ─────────────────────────────────────────────────── */}
+      <Card className={
+        !healthLoading && fleetHealth &&
+        (fleetHealth.failure > 0 || fleetHealth.neverFired > 0)
+          ? 'border-red-500/30'
+          : !healthLoading && fleetHealth && fleetHealth.warning > 0
+            ? 'border-yellow-500/30'
+            : ''
+      }>
+        <CardHeader className="pb-3">
+          <div className="flex items-center justify-between">
+            <CardTitle className="text-sm font-medium">Fleet Health</CardTitle>
+            <button
+              onClick={() => router.push('/workflows/health')}
+              className="flex items-center gap-1 text-xs text-muted-foreground hover:text-foreground transition-colors"
+            >
+              View all
+              <IconArrowRight size={12} />
+            </button>
+          </div>
+        </CardHeader>
+        <CardContent className="pt-0">
+          {healthLoading ? (
+            <div className="grid grid-cols-4 gap-2">
+              {[1, 2, 3, 4].map(i => (
+                <div key={i} className="h-12 rounded-md bg-muted/30 animate-pulse" />
+              ))}
+            </div>
+          ) : fleetHealth ? (
+            <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+              {/* Total */}
+              <div className="text-center">
+                <p className="text-2xl font-semibold">{fleetHealth.total}</p>
+                <p className="text-xs text-muted-foreground mt-0.5">total</p>
+              </div>
+              {/* Healthy */}
+              <div className="text-center">
+                <p className={`text-2xl font-semibold flex items-center justify-center gap-1 ${fleetHealth.healthy > 0 ? 'text-green-600 dark:text-green-400' : ''}`}>
+                  <IconCircleCheck size={16} className="shrink-0" />
+                  {fleetHealth.healthy}
+                </p>
+                <p className="text-xs text-muted-foreground mt-0.5">healthy</p>
+              </div>
+              {/* Warning */}
+              <div className="text-center">
+                <p className={`text-2xl font-semibold flex items-center justify-center gap-1 ${fleetHealth.warning > 0 ? 'text-yellow-600 dark:text-yellow-400' : 'text-muted-foreground'}`}>
+                  <IconAlertTriangle size={16} className="shrink-0" />
+                  {fleetHealth.warning}
+                </p>
+                <p className="text-xs text-muted-foreground mt-0.5">warning</p>
+              </div>
+              {/* Failure + Never-fired */}
+              <div className="text-center">
+                <p className={`text-2xl font-semibold flex items-center justify-center gap-1 ${(fleetHealth.failure + fleetHealth.neverFired) > 0 ? 'text-red-600 dark:text-red-400' : 'text-muted-foreground'}`}>
+                  <IconCircleX size={16} className="shrink-0" />
+                  {fleetHealth.failure + fleetHealth.neverFired}
+                </p>
+                <p className="text-xs text-muted-foreground mt-0.5">
+                  failed
+                  {fleetHealth.neverFired > 0 && ` / ${fleetHealth.neverFired} new`}
+                </p>
+              </div>
+            </div>
+          ) : (
+            <p className="text-xs text-muted-foreground text-center py-2">
+              Health data unavailable
+            </p>
+          )}
+        </CardContent>
+      </Card>
 
       {/* Summary cards */}
       <div className="grid grid-cols-2 md:grid-cols-3 gap-3">
