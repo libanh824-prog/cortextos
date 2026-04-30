@@ -44,6 +44,8 @@ export interface CronFormValues {
   prompt: string;
   enabled: boolean;
   description?: string;
+  /** When true, the Test Fire button is disabled and the IPC handler refuses manual fires. */
+  manualFireDisabled?: boolean;
 }
 
 export interface CronFormProps {
@@ -100,6 +102,7 @@ export default function CronForm({
     prompt: initialValues?.prompt ?? '',
     enabled: initialValues?.enabled ?? true,
     description: initialValues?.description ?? '',
+    manualFireDisabled: initialValues?.manualFireDisabled ?? false,
   });
 
   const [touched, setTouched] = useState<Partial<Record<keyof CronFormValues, boolean>>>({});
@@ -137,6 +140,7 @@ export default function CronForm({
               prompt: values.prompt.trim(),
               enabled: values.enabled,
               ...(values.description?.trim() ? { description: values.description.trim() } : {}),
+              ...(values.manualFireDisabled ? { manualFireDisabled: true } : {}),
             },
           }),
         });
@@ -146,6 +150,7 @@ export default function CronForm({
           schedule: values.schedule.trim(),
           prompt: values.prompt.trim(),
           enabled: values.enabled,
+          manualFireDisabled: values.manualFireDisabled ?? false,
         };
         if (values.description !== undefined) {
           patch.description = values.description.trim() || undefined;
@@ -355,6 +360,23 @@ export default function CronForm({
           checked={values.enabled}
           onCheckedChange={v => setValues(prev => ({ ...prev, enabled: v }))}
           aria-label="Enable cron"
+        />
+      </div>
+
+      {/* Disable manual fire toggle */}
+      <div className="flex items-center justify-between rounded-md border px-3 py-2.5">
+        <div>
+          <p className="text-sm font-medium">Disable manual fire</p>
+          <p className="text-xs text-muted-foreground">
+            When enabled, the Test Fire button is hidden and manual IPC triggers are refused.
+            Use for crons with strict scheduling contracts or destructive operations.
+          </p>
+        </div>
+        <Switch
+          checked={values.manualFireDisabled ?? false}
+          onCheckedChange={v => setValues(prev => ({ ...prev, manualFireDisabled: v }))}
+          aria-label="Disable manual fire"
+          data-testid="manual-fire-disabled-toggle"
         />
       </div>
 

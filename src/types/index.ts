@@ -350,6 +350,17 @@ export interface CronDefinition {
    * @example { "priority": "high", "source": "/loop" }
    */
   metadata?: Record<string, unknown>;
+
+  /**
+   * When true, the Test Fire button in the dashboard is disabled and the
+   * IPC fire-cron handler refuses manual-trigger requests.
+   *
+   * Use this for crons that must only run on their schedule (e.g. crons
+   * that do destructive operations or have strict rate-limit contracts).
+   *
+   * @default false (manual fire is allowed by default — opt-out model)
+   */
+  manualFireDisabled?: boolean;
 }
 
 // ---------------------------------------------------------------------------

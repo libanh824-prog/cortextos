@@ -4,13 +4,110 @@ import { join, resolve as pathResolve } from 'path';
 import type { IPCRequest, IPCResponse, CronSummaryRow, CronDefinition } from '../types/index.js';
 import { AgentManager } from './agent-manager.js';
 import { getIpcPath } from '../utils/paths.js';
-import { readCrons, getExecutionLog, getExecutionLogPage, addCron, updateCron, removeCron } from '../bus/crons.js';
+import { readCrons, getExecutionLog, getExecutionLogPage, addCron, updateCron, removeCron, getCronByName } from '../bus/crons.js';
 import type { ExecutionLogStatusFilter } from '../bus/crons.js';
 import { nextFireFromCron } from './cron-scheduler.js';
 import { parseDurationMs } from '../bus/cron-state.js';
 import { computeHealth, aggregateFleetHealth } from '../utils/cron-health.js';
 
 const WORKER_NAME_REGEX = /^[a-z0-9_-]+$/;
+
+// ---------------------------------------------------------------------------
+// Manual fire cooldown — Subtask 4.5
+// ---------------------------------------------------------------------------
+
+/** Cooldown window (ms) between manual test-fire requests for the same cron. */
+export const MANUAL_FIRE_COOLDOWN_MS = 30_000;
+
+/**
+ * In-memory map tracking the last manual fire time per (agent, cronName).
+ * Key format: `${agent}::${cronName}`.
+ * Exported for testing; do not mutate directly outside tests.
+ */
+export const _manualFireLastFired = new Map<string, number>();
+
+/**
+ * Returns the remaining cooldown in milliseconds for a given (agent, cronName).
+ * Returns 0 when the cooldown has elapsed (or was never set).
+ *
+ * @param agent    - Agent name.
+ * @param cronName - Cron name.
+ * @param nowMs    - Current epoch ms (injectable for testing).
+ */
+export function manualFireCooldownRemaining(
+  agent: string,
+  cronName: string,
+  nowMs = Date.now(),
+): number {
+  const key = `${agent}::${cronName}`;
+  const lastFired = _manualFireLastFired.get(key);
+  if (lastFired === undefined) return 0;
+  const elapsed = nowMs - lastFired;
+  return elapsed >= MANUAL_FIRE_COOLDOWN_MS ? 0 : MANUAL_FIRE_COOLDOWN_MS - elapsed;
+}
+
+/**
+ * Result returned by handleFireCron.
+ */
+export interface FireCronResult {
+  ok: boolean;
+  firedAt?: number;
+  error?: string;
+}
+
+/**
+ * fire-cron handler — validates manualFireDisabled + cooldown, then injects
+ * the cron's prompt into the agent's PTY.
+ *
+ * @param agent      - Agent name.
+ * @param cronName   - Cron name.
+ * @param injectFn   - Injection function (agentManager.injectAgent or test stub).
+ * @param nowMs      - Epoch ms for "now" (injectable for testing).
+ */
+export function handleFireCron(
+  agent: string | undefined,
+  cronName: string | undefined,
+  injectFn: (agent: string, text: string) => boolean,
+  nowMs = Date.now(),
+): FireCronResult {
+  if (!agent || !agent.trim()) {
+    return { ok: false, error: 'Agent name is required.' };
+  }
+  if (!cronName || !cronName.trim()) {
+    return { ok: false, error: 'Cron name is required.' };
+  }
+
+  // Look up the cron definition
+  const cron = getCronByName(agent, cronName);
+  if (!cron) {
+    return { ok: false, error: `Cron '${cronName}' not found for agent '${agent}'.` };
+  }
+
+  // Enforce manualFireDisabled opt-out
+  if (cron.manualFireDisabled) {
+    return { ok: false, error: 'Manual fire disabled for this cron.' };
+  }
+
+  // Enforce cooldown
+  const remaining = manualFireCooldownRemaining(agent, cronName, nowMs);
+  if (remaining > 0) {
+    const waitSec = Math.ceil(remaining / 1000);
+    return { ok: false, error: `Cooldown active — wait ${waitSec}s before firing again.` };
+  }
+
+  // Inject into PTY
+  const injection = `[CRON: ${cronName}] ${cron.prompt}`;
+  const injected = injectFn(agent, injection);
+  if (!injected) {
+    return { ok: false, error: `Agent '${agent}' not found or not running.` };
+  }
+
+  // Record fire time for cooldown tracking
+  const firedAt = nowMs;
+  _manualFireLastFired.set(`${agent}::${cronName}`, firedAt);
+
+  return { ok: true, firedAt };
+}
 
 // ---------------------------------------------------------------------------
 // list-all-crons helper — Subtask 4.1
@@ -292,6 +389,9 @@ export function handleAddCron(
     created_at: new Date().toISOString(),
     ...(definition.description ? { description: definition.description } : {}),
     ...(definition.metadata ? { metadata: definition.metadata } : {}),
+    ...(definition.manualFireDisabled !== undefined
+      ? { manualFireDisabled: !!definition.manualFireDisabled }
+      : {}),
   };
 
   try {
@@ -623,16 +723,21 @@ export class IPCServer {
 
         case 'fire-cron': {
           const agentToFire = request.agent;
-          const cronName = request.data?.name as string | undefined;
-          const cronPrompt = request.data?.prompt as string | undefined;
-          if (!agentToFire || !cronName || !cronPrompt) {
-            response = { success: false, error: 'fire-cron requires: agent, data.name, data.prompt' };
+          const fireCronName = request.data?.name as string | undefined;
+          const fireCronResult = handleFireCron(
+            agentToFire,
+            fireCronName,
+            (a, text) => this.agentManager.injectAgent(a, text),
+          );
+          if (fireCronResult.ok) {
+            // Invalidate fleet health cache so next poll reflects the new fire
+            invalidateFleetHealthCache();
+            response = {
+              success: true,
+              data: { ok: true, firedAt: fireCronResult.firedAt },
+            };
           } else {
-            const injection = `[CRON: ${cronName}] ${cronPrompt}`;
-            const ok = this.agentManager.injectAgent(agentToFire, injection);
-            response = ok
-              ? { success: true, data: `Fired cron '${cronName}' for ${agentToFire}` }
-              : { success: false, error: `Agent ${agentToFire} not found or not running` };
+            response = { success: false, error: fireCronResult.error };
           }
           break;
         }
