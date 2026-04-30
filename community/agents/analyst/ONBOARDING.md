@@ -183,19 +183,25 @@ NIGHT_HOUR=${NIGHT_HOUR:-18}
 echo "Day starts: ${DAY_HOUR}:00, Night starts: ${NIGHT_HOUR}:00"
 ```
 
-**Always set up this interval-based cron via `/loop`:**
+**Set up the heartbeat cron via `cortextos bus add-cron`:**
 
 - Heartbeat (every 4h): `Read HEARTBEAT.md and follow its instructions. Update your heartbeat, check inbox, and work on your highest priority task.`
 
-Run `/loop 4h <prompt>`, then verify `config.json` already has a `heartbeat` entry (it does by default - skip adding a duplicate).
+```bash
+cortextos bus add-cron $CTX_AGENT_NAME heartbeat 4h "Read HEARTBEAT.md and follow its instructions. Update your heartbeat, check inbox, and work on your highest priority task."
+```
 
-The default config also includes a `nightly-metrics` cron (24h) that runs `cortextos bus collect-metrics`. Confirm it exists in config.json and leave it in place.
+Then verify with `cortextos bus list-crons $CTX_AGENT_NAME` — if a `heartbeat` entry already exists, skip adding a duplicate.
+
+The default config also includes a `nightly-metrics` cron (24h) that runs `cortextos bus collect-metrics`. Verify it exists: `cortextos bus list-crons $CTX_AGENT_NAME`.
+
+Do NOT use `/loop` for these — those crons are session-only and will not survive a restart.
 
 **Ask about additional crons:**
 > "I have a heartbeat cycle every 4 hours and nightly metrics collection. Want me to add any other recurring checks? For example: daily reports, integration health checks, custom monitoring."
 
 For each additional cron the user requests:
-- Interval-based → `/loop <interval> <prompt>`, add to config.json
+- Add via bus: `cortextos bus add-cron $CTX_AGENT_NAME <name> <interval> "<prompt>"`
 - If complex, create a skill file at `.claude/skills/<workflow-name>/SKILL.md`
 
 ### Step 13: Ask for tools and access

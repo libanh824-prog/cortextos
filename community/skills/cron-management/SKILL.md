@@ -27,25 +27,27 @@ external_calls: []
 
 ## On Session Start
 
-Restore all crons from config.json:
+Crons are **daemon-managed** — they auto-load from `crons.json` on daemon start. No manual restoration needed.
 
-1. Run CronList — note which crons are already active (avoid duplicates)
-2. For each entry in `config.json` crons:
-   - **type: recurring** (or no type): call `/loop {interval} {prompt}` if not already active
-   - **type: once**: check if `fire_at` is in the future
-     - Yes: recreate with CronCreate (set `recurring: false`, compute cron expression from fire_at)
-     - No (already past): delete this entry from config.json — it expired while you were offline
+To verify what's scheduled:
+```bash
+cortextos bus list-crons $CTX_AGENT_NAME
+```
 
 ---
 
 ## Creating a Recurring Cron
 
-1. Write to `config.json` first:
-   ```json
-   { "name": "descriptive-name", "type": "recurring", "interval": "1h", "prompt": "What to do each cycle" }
-   ```
-2. Create the live cron: `/loop 1h What to do each cycle`
-3. Confirm to the user that the cron is active and persisted
+```bash
+cortextos bus add-cron $CTX_AGENT_NAME <name> <interval> "<prompt>"
+```
+
+Example:
+```bash
+cortextos bus add-cron $CTX_AGENT_NAME heartbeat 4h "Read HEARTBEAT.md and follow its instructions."
+```
+
+Confirm with `cortextos bus list-crons $CTX_AGENT_NAME`. Do NOT use `/loop` — that is session-only and will not survive a restart.
 
 ---
 

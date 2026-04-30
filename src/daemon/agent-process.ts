@@ -784,10 +784,8 @@ export class AgentProcess {
         if (gapMs > threshold) {
           const gapMin = Math.round(gapMs / 60_000);
           const expectedMin = Math.round(intervalMs / 60_000);
-          const restoreHint = cronDef.interval
-            ? `If missing, restore it from config.json: /loop ${cronDef.interval} <cron prompt>.`
-            : `If missing, restore it from config.json using the cron expression in your config.`;
-          const nudge = `[SYSTEM] Cron gap detected for "${cronDef.name}": last fired ${gapMin} minutes ago (expected every ${expectedMin} minutes). Run CronList to verify the cron is still active. ${restoreHint}`;
+          const restoreHint = `The daemon manages this cron externally — run \`cortextos bus list-crons $CTX_AGENT_NAME\` to verify it is scheduled. If missing, use the cron-management skill to re-add it.`;
+          const nudge = `[SYSTEM] Cron gap detected for "${cronDef.name}": last fired ${gapMin} minutes ago (expected every ${expectedMin} minutes). ${restoreHint}`;
 
           this.log(`Gap nudge: ${cronDef.name} silent ${gapMin}min (threshold: ${Math.round(threshold / 60_000)}min)`);
           if (this.pty && this.status === 'running') {
@@ -863,7 +861,7 @@ export class AgentProcess {
 
     // Inject the verification prompt
     const cronList = expectedCrons.join(', ');
-    const verifyPrompt = `[SYSTEM] Cron verification: your config.json defines these recurring crons: ${cronList}. Run CronList now. If any are missing, restore them from config.json using /loop. This is an automated safety check.`;
+    const verifyPrompt = `[SYSTEM] Cron verification: the daemon expects these recurring crons to be firing: ${cronList}. Run \`cortextos bus list-crons $CTX_AGENT_NAME\` to confirm they are scheduled. If any are missing, use the cron-management skill to re-add them via cortextos bus add-cron. This is an automated safety check.`;
 
     this.log(`Injecting cron verification (expecting: ${cronList})`);
     if (this.pty) {
