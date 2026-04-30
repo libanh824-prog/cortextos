@@ -1,10 +1,10 @@
 import { createServer, Server, Socket } from 'net';
 import { existsSync, unlinkSync, chmodSync, readFileSync } from 'fs';
 import { join, resolve as pathResolve } from 'path';
-import type { IPCRequest, IPCResponse, CronSummaryRow } from '../types/index.js';
+import type { IPCRequest, IPCResponse, CronSummaryRow, CronDefinition } from '../types/index.js';
 import { AgentManager } from './agent-manager.js';
 import { getIpcPath } from '../utils/paths.js';
-import { readCrons, getExecutionLog } from '../bus/crons.js';
+import { readCrons, getExecutionLog, addCron, updateCron, removeCron } from '../bus/crons.js';
 import { nextFireFromCron } from './cron-scheduler.js';
 import { parseDurationMs } from '../bus/cron-state.js';
 
@@ -90,6 +90,197 @@ function listAllCrons(): CronSummaryRow[] {
   }
 
   return rows;
+}
+
+// ---------------------------------------------------------------------------
+// Cron mutation helpers — Subtask 4.2
+// ---------------------------------------------------------------------------
+
+/** Interval shorthand regex — matches "6h", "30m", "1d", "2w" etc. */
+const INTERVAL_REGEX = /^\d+(s|m|h|d|w)$/;
+
+/** Cron name must be non-empty and contain only URL-safe chars (no whitespace). */
+const CRON_NAME_REGEX = /^[a-zA-Z0-9_-]+$/;
+
+/**
+ * Validate a schedule string as either an interval shorthand or a valid
+ * 5-field cron expression.  Returns true if valid.
+ */
+export function isValidSchedule(schedule: string): boolean {
+  if (!schedule || !schedule.trim()) return false;
+  const s = schedule.trim();
+  if (INTERVAL_REGEX.test(s)) return true;
+  // Try 5-field cron expression via nextFireFromCron — if it returns NaN it's invalid.
+  const parts = s.split(/\s+/);
+  if (parts.length !== 5) return false;
+  const testMs = nextFireFromCron(s, Date.now());
+  return !isNaN(testMs);
+}
+
+/**
+ * Read the list of enabled agent names from enabled-agents.json.
+ */
+function getEnabledAgents(): string[] {
+  const ctxRoot = process.env.CTX_ROOT ?? process.cwd();
+  const enabledFile = join(ctxRoot, 'config', 'enabled-agents.json');
+  if (!existsSync(enabledFile)) return [];
+  try {
+    const data = JSON.parse(readFileSync(enabledFile, 'utf-8')) as Record<
+      string,
+      { enabled?: boolean }
+    >;
+    return Object.entries(data)
+      .filter(([, v]) => v.enabled !== false)
+      .map(([k]) => k);
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * Structured result returned by IPC mutation handlers.
+ * ok: true means success; ok: false means a validation / not-found error.
+ */
+export interface MutationResult {
+  ok: boolean;
+  error?: string;
+  field?: string;
+}
+
+/**
+ * add-cron handler — validates inputs and delegates to bus/crons addCron.
+ */
+export function handleAddCron(
+  agent: string | undefined,
+  definition: Partial<CronDefinition> | undefined,
+): MutationResult {
+  // Validate agent
+  if (!agent || !agent.trim()) {
+    return { ok: false, error: 'Agent name is required.', field: 'agent' };
+  }
+  const enabledAgents = getEnabledAgents();
+  if (enabledAgents.length > 0 && !enabledAgents.includes(agent)) {
+    return {
+      ok: false,
+      error: `Agent '${agent}' not found. Enabled agents: ${enabledAgents.join(', ')}`,
+      field: 'agent',
+    };
+  }
+
+  // Validate definition shape
+  if (!definition || typeof definition !== 'object') {
+    return { ok: false, error: 'definition is required.', field: 'definition' };
+  }
+
+  // Validate name
+  const name = definition.name ?? '';
+  if (!name || !CRON_NAME_REGEX.test(name)) {
+    return {
+      ok: false,
+      error: 'Cron name must be non-empty with no whitespace (letters, digits, _ and - only).',
+      field: 'name',
+    };
+  }
+
+  // Validate schedule
+  const schedule = definition.schedule ?? '';
+  if (!isValidSchedule(schedule)) {
+    return {
+      ok: false,
+      error: `Invalid schedule '${schedule}'. Use an interval (e.g. "6h", "30m") or a 5-field cron expression (e.g. "0 9 * * *").`,
+      field: 'schedule',
+    };
+  }
+
+  // Validate prompt
+  const prompt = definition.prompt ?? '';
+  if (!prompt || !prompt.trim()) {
+    return { ok: false, error: 'Prompt is required and must be non-empty.', field: 'prompt' };
+  }
+
+  const fullDef: CronDefinition = {
+    name,
+    prompt: prompt.trim(),
+    schedule: schedule.trim(),
+    enabled: definition.enabled !== false,
+    created_at: new Date().toISOString(),
+    ...(definition.description ? { description: definition.description } : {}),
+    ...(definition.metadata ? { metadata: definition.metadata } : {}),
+  };
+
+  try {
+    addCron(agent, fullDef);
+  } catch (err) {
+    // addCron throws on duplicate name
+    const msg = err instanceof Error ? err.message : String(err);
+    return { ok: false, error: msg, field: 'name' };
+  }
+
+  return { ok: true };
+}
+
+/**
+ * update-cron handler — validates and patches an existing cron.
+ */
+export function handleUpdateCron(
+  agent: string | undefined,
+  name: string | undefined,
+  patch: Partial<CronDefinition> | undefined,
+): MutationResult {
+  if (!agent || !agent.trim()) {
+    return { ok: false, error: 'Agent name is required.', field: 'agent' };
+  }
+  if (!name || !name.trim()) {
+    return { ok: false, error: 'Cron name is required.', field: 'name' };
+  }
+  if (!patch || typeof patch !== 'object') {
+    return { ok: false, error: 'patch is required.', field: 'patch' };
+  }
+
+  // Validate schedule if provided
+  if (patch.schedule !== undefined) {
+    if (!isValidSchedule(patch.schedule)) {
+      return {
+        ok: false,
+        error: `Invalid schedule '${patch.schedule}'. Use an interval (e.g. "6h") or a 5-field cron expression.`,
+        field: 'schedule',
+      };
+    }
+  }
+
+  // Validate prompt if provided
+  if (patch.prompt !== undefined && !patch.prompt.trim()) {
+    return { ok: false, error: 'Prompt must be non-empty.', field: 'prompt' };
+  }
+
+  const found = updateCron(agent, name, patch);
+  if (!found) {
+    return { ok: false, error: `Cron '${name}' not found for agent '${agent}'.` };
+  }
+
+  return { ok: true };
+}
+
+/**
+ * remove-cron handler — removes a cron by agent + name.
+ */
+export function handleRemoveCron(
+  agent: string | undefined,
+  name: string | undefined,
+): MutationResult {
+  if (!agent || !agent.trim()) {
+    return { ok: false, error: 'Agent name is required.', field: 'agent' };
+  }
+  if (!name || !name.trim()) {
+    return { ok: false, error: 'Cron name is required.', field: 'name' };
+  }
+
+  const found = removeCron(agent, name);
+  if (!found) {
+    return { ok: false, error: `Cron '${name}' not found for agent '${agent}'.` };
+  }
+
+  return { ok: true };
 }
 
 /**
@@ -377,6 +568,50 @@ export class IPCServer {
           } else {
             const entries = getExecutionLog(execAgent, execCronName, execLimit);
             response = { success: true, data: entries };
+          }
+          break;
+        }
+
+        case 'add-cron': {
+          const result = handleAddCron(
+            request.agent,
+            request.data?.definition as Partial<CronDefinition> | undefined,
+          );
+          if (result.ok) {
+            // Trigger scheduler reload for this agent
+            if (request.agent) this.agentManager.reloadCrons(request.agent);
+            response = { success: true, data: { ok: true } };
+          } else {
+            response = { success: false, error: result.error ?? 'add-cron failed', data: result };
+          }
+          break;
+        }
+
+        case 'update-cron': {
+          const result = handleUpdateCron(
+            request.agent,
+            request.data?.name as string | undefined,
+            request.data?.patch as Partial<CronDefinition> | undefined,
+          );
+          if (result.ok) {
+            if (request.agent) this.agentManager.reloadCrons(request.agent);
+            response = { success: true, data: { ok: true } };
+          } else {
+            response = { success: false, error: result.error ?? 'update-cron failed', data: result };
+          }
+          break;
+        }
+
+        case 'remove-cron': {
+          const result = handleRemoveCron(
+            request.agent,
+            request.data?.name as string | undefined,
+          );
+          if (result.ok) {
+            if (request.agent) this.agentManager.reloadCrons(request.agent);
+            response = { success: true, data: { ok: true } };
+          } else {
+            response = { success: false, error: result.error ?? 'remove-cron failed', data: result };
           }
           break;
         }

@@ -65,6 +65,89 @@ export function formatSchedule(schedule: string): string {
   return schedule;
 }
 
+// ---------------------------------------------------------------------------
+// Form / mutation validation helpers — Subtask 4.2
+// ---------------------------------------------------------------------------
+
+/** Interval shorthand: digits followed by one of s/m/h/d/w */
+const INTERVAL_REGEX = /^\d+(s|m|h|d|w)$/;
+
+/** Minimal 5-field cron expression validator (same logic as ipc-server.ts) */
+function isValidCronExpr(s: string): boolean {
+  const parts = s.trim().split(/\s+/);
+  if (parts.length !== 5) return false;
+  // Validate each field against its allowed range
+  const ranges: [number, number][] = [[0, 59], [0, 23], [1, 31], [1, 12], [0, 6]];
+  for (let i = 0; i < 5; i++) {
+    const field = parts[i];
+    const [min, max] = ranges[i];
+    try {
+      expandFieldClient(field, min, max);
+    } catch {
+      return false;
+    }
+  }
+  return true;
+}
+
+function expandFieldClient(field: string, min: number, max: number): void {
+  for (const part of field.split(',')) {
+    if (part === '*') continue;
+    if (part.startsWith('*/')) {
+      const step = parseInt(part.slice(2), 10);
+      if (isNaN(step) || step <= 0) throw new Error('bad step');
+      continue;
+    }
+    if (part.includes('-')) {
+      const [lo, hi] = part.split('-').map(s => parseInt(s, 10));
+      if (isNaN(lo) || isNaN(hi) || lo > hi || lo < min || hi > max) throw new Error('bad range');
+      continue;
+    }
+    const n = parseInt(part, 10);
+    if (isNaN(n) || n < min || n > max) throw new Error('bad value');
+  }
+}
+
+/**
+ * Validate a schedule string (interval shorthand or 5-field cron expression).
+ * Returns true if the schedule is well-formed and can be parsed by the daemon.
+ *
+ * @example isValidScheduleClient("6h")         // true
+ * @example isValidScheduleClient("0 9 * * *")  // true
+ * @example isValidScheduleClient("6 hours")    // false
+ * @example isValidScheduleClient("abc")        // false
+ */
+export function isValidScheduleClient(schedule: string): boolean {
+  if (!schedule || !schedule.trim()) return false;
+  const s = schedule.trim();
+  return INTERVAL_REGEX.test(s) || isValidCronExpr(s);
+}
+
+/**
+ * Validate a cron name string.
+ * Must be non-empty with no whitespace (letters, digits, _ and - only).
+ */
+export function isValidCronName(name: string): boolean {
+  return /^[a-zA-Z0-9_-]+$/.test(name) && name.length > 0;
+}
+
+/**
+ * Format a schedule string as an example label.
+ * Used to provide inline hints in the cron form.
+ */
+export function scheduleExamples(): Array<{ value: string; label: string }> {
+  return [
+    { value: '6h',          label: 'every 6 hours' },
+    { value: '24h',         label: 'every 24 hours (daily)' },
+    { value: '30m',         label: 'every 30 minutes' },
+    { value: '1d',          label: 'every day' },
+    { value: '0 9 * * *',   label: 'daily at 09:00 UTC' },
+    { value: '0 13 * * *',  label: 'daily at 13:00 UTC (09:00 ET)' },
+    { value: '0 16 * * 1',  label: 'every Monday at 16:00 UTC' },
+    { value: '*/15 * * * *', label: 'every 15 minutes' },
+  ];
+}
+
 /**
  * Format a timestamp as a relative string ("2 hours ago", "in 5 minutes").
  * Falls back to the ISO string if the input is null/undefined/unparseable.

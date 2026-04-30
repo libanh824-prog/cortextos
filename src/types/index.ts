@@ -573,7 +573,10 @@ export type IPCCommandType =
   | 'fire-cron'
   | 'inject-agent'
   | 'list-all-crons'
-  | 'list-cron-executions';
+  | 'list-cron-executions'
+  | 'add-cron'
+  | 'update-cron'
+  | 'remove-cron';
 
 // ---------------------------------------------------------------------------
 // list-all-crons response shape — Subtask 4.1

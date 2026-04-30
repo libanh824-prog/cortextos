@@ -1,6 +1,7 @@
 'use client';
 
 import { useState, useEffect, useCallback } from 'react';
+import { useRouter } from 'next/navigation';
 import { useOrg } from '@/hooks/use-org';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
@@ -21,6 +22,7 @@ import {
   IconHistory,
   IconSearch,
   IconFilter,
+  IconExternalLink,
 } from '@tabler/icons-react';
 import { formatRelative, formatSchedule } from '@/lib/cron-utils';
 
@@ -122,6 +124,7 @@ function statusLabel(status: 'fired' | 'retried' | 'failed' | null): string {
 // ---------------------------------------------------------------------------
 
 export default function WorkflowsPage() {
+  const router = useRouter();
   const { currentOrg } = useOrg();
 
   // ── Cron-status data (from /api/workflows/crons) ──────────────────────────
@@ -372,13 +375,22 @@ export default function WorkflowsPage() {
             Scheduled crons across all agents
           </p>
         </div>
-        <button
-          onClick={handleRefresh}
-          className="p-2 rounded-md hover:bg-muted transition-colors"
-          title="Refresh"
-        >
-          <IconRefresh size={18} className={(loading || statusLoading) ? 'animate-spin' : ''} />
-        </button>
+        <div className="flex items-center gap-2">
+          <Button
+            size="sm"
+            onClick={() => router.push('/workflows/new')}
+          >
+            <IconPlus size={14} className="mr-1" />
+            New Cron
+          </Button>
+          <button
+            onClick={handleRefresh}
+            className="p-2 rounded-md hover:bg-muted transition-colors"
+            title="Refresh"
+          >
+            <IconRefresh size={18} className={(loading || statusLoading) ? 'animate-spin' : ''} />
+          </button>
+        </div>
       </div>
 
       {/* Summary cards */}
@@ -504,7 +516,7 @@ export default function WorkflowsPage() {
                       <>
                         <tr
                           key={`${row.agent}::${row.cron.name}`}
-                          className={`border-b last:border-0 cursor-pointer hover:bg-muted/50 transition-colors ${isSelected ? 'bg-muted/70' : ''}`}
+                          className={`border-b last:border-0 cursor-pointer hover:bg-muted/50 transition-colors group ${isSelected ? 'bg-muted/70' : ''}`}
                           onClick={() => {
                             if (isSelected) {
                               setSelectedCron(null);
@@ -523,6 +535,16 @@ export default function WorkflowsPage() {
                             <div className="flex items-center gap-1.5">
                               <IconClock size={13} className="text-muted-foreground shrink-0" />
                               <span>{row.cron.name}</span>
+                              <button
+                                className="opacity-0 group-hover:opacity-100 transition-opacity ml-0.5 text-muted-foreground hover:text-foreground"
+                                title="Open detail page"
+                                onClick={e => {
+                                  e.stopPropagation();
+                                  router.push(`/workflows/${encodeURIComponent(row.agent)}/${encodeURIComponent(row.cron.name)}`);
+                                }}
+                              >
+                                <IconExternalLink size={12} />
+                              </button>
                             </div>
                             {row.cron.description && (
                               <p className="text-xs text-muted-foreground mt-0.5 line-clamp-1">
@@ -780,7 +802,17 @@ export default function WorkflowsPage() {
                           <div className="flex items-center gap-1 md:opacity-0 md:group-hover:opacity-100 transition-opacity shrink-0">
                             <button
                               className="p-1.5 rounded hover:bg-muted"
-                              title="Edit"
+                              title="Open detail / edit page"
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                router.push(`/workflows/${encodeURIComponent(agent.name)}/${encodeURIComponent(cron.name)}`);
+                              }}
+                            >
+                              <IconExternalLink size={16} />
+                            </button>
+                            <button
+                              className="p-1.5 rounded hover:bg-muted"
+                              title="Edit (inline)"
                               onClick={(e) => {
                                 e.stopPropagation();
                                 setEditCron({ ...cron });
@@ -805,7 +837,7 @@ export default function WorkflowsPage() {
                     );
                   })}
 
-                  {/* Add cron form */}
+                  {/* Add cron form — inline or navigate to /workflows/new */}
                   {addingTo === agent.name ? (
                     <div className="rounded-md border border-dashed border-primary/30 px-3 py-3 space-y-2">
                       <div className="flex gap-2">

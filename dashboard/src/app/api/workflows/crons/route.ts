@@ -18,6 +18,7 @@ import path from 'path';
 import { NextRequest } from 'next/server';
 import { CTX_ROOT, getAllAgents } from '@/lib/config';
 import { parseDurationMs } from '@/lib/cron-utils';
+import { IPCClient } from '@/lib/ipc-client';
 
 export const dynamic = 'force-dynamic';
 
@@ -232,4 +233,59 @@ function nextFireFromCronExpr(expr: string, fromMs: number): number {
   }
 
   return NaN;
+}
+
+// ---------------------------------------------------------------------------
+// POST /api/workflows/crons — create a new cron via IPC add-cron
+// ---------------------------------------------------------------------------
+
+export async function POST(request: NextRequest) {
+  let body: unknown;
+  try {
+    body = await request.json();
+  } catch {
+    return Response.json({ error: 'Invalid JSON body' }, { status: 400 });
+  }
+
+  const { agent, definition } = (body ?? {}) as {
+    agent?: unknown;
+    definition?: unknown;
+  };
+
+  if (!agent || typeof agent !== 'string') {
+    return Response.json({ error: 'agent is required', field: 'agent' }, { status: 400 });
+  }
+  if (!definition || typeof definition !== 'object') {
+    return Response.json({ error: 'definition is required', field: 'definition' }, { status: 400 });
+  }
+
+  const ipc = new IPCClient();
+  try {
+    const resp = await ipc.send({
+      type: 'add-cron',
+      agent,
+      data: { definition: definition as Record<string, unknown> },
+      source: 'dashboard/api',
+    } as Parameters<typeof ipc.send>[0]);
+
+    if (resp.success) {
+      return Response.json({ ok: true }, { status: 201 });
+    }
+
+    // Detect duplicate name → 409
+    const errMsg = resp.error ?? '';
+    if (errMsg.includes('already exists')) {
+      return Response.json({ error: errMsg, field: 'name' }, { status: 409 });
+    }
+
+    // Otherwise 400 with structured error from MutationResult
+    const detail = (resp.data ?? {}) as Record<string, unknown>;
+    return Response.json(
+      { error: errMsg, field: detail.field ?? undefined },
+      { status: 400 },
+    );
+  } catch (err) {
+    console.error('[api/workflows/crons] POST error:', err);
+    return Response.json({ error: 'Failed to create cron (IPC error)' }, { status: 500 });
+  }
 }
