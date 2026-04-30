@@ -47,18 +47,10 @@ function cronsFilePath(agentName: string): string {
 // ---------------------------------------------------------------------------
 
 /**
- * Read all cron definitions for an agent from disk.
- *
- * @returns Array of CronDefinition objects.  Returns [] when the file is
- *          absent or cannot be parsed — never throws.
+ * Try to parse a raw crons.json string and return the crons array, or null on failure.
  */
-export function readCrons(agentName: string): CronDefinition[] {
-  const filePath = cronsFilePath(agentName);
-  if (!existsSync(filePath)) {
-    return [];
-  }
+function parseCronsRaw(raw: string, agentName: string, label: string): CronDefinition[] | null {
   try {
-    const raw = readFileSync(filePath, 'utf-8');
     const parsed: unknown = JSON.parse(raw);
     if (
       parsed !== null &&
@@ -68,24 +60,78 @@ export function readCrons(agentName: string): CronDefinition[] {
     ) {
       return (parsed as CronsFile).crons;
     }
-    // File exists but envelope shape is wrong — treat as empty
     process.stderr.write(
-      `[crons] WARNING: crons.json for agent "${agentName}" has unexpected shape; treating as empty.\n`
+      `[crons] WARNING: ${label} for agent "${agentName}" has unexpected shape.\n`
     );
-    return [];
+    return null;
   } catch (err) {
     process.stderr.write(
-      `[crons] WARNING: failed to parse crons.json for agent "${agentName}" — treating as empty. ` +
+      `[crons] WARNING: failed to parse ${label} for agent "${agentName}". ` +
         `Error: ${err instanceof Error ? err.message : String(err)}\n`
     );
+    return null;
+  }
+}
+
+/**
+ * Read all cron definitions for an agent from disk.
+ *
+ * On parse failure the function automatically falls back to the `.bak` file
+ * written by the most recent `writeCrons()` call.  This provides single-step
+ * automatic recovery from transient corruption without requiring operator
+ * intervention.
+ *
+ * @returns Array of CronDefinition objects.  Returns [] when both the primary
+ *          file and the backup are absent or unparseable — never throws.
+ */
+export function readCrons(agentName: string): CronDefinition[] {
+  const filePath = cronsFilePath(agentName);
+  if (!existsSync(filePath)) {
     return [];
   }
+  try {
+    const raw = readFileSync(filePath, 'utf-8');
+    const crons = parseCronsRaw(raw, agentName, 'crons.json');
+    if (crons !== null) {
+      return crons;
+    }
+  } catch (err) {
+    process.stderr.write(
+      `[crons] WARNING: failed to read crons.json for agent "${agentName}" — ` +
+        `${err instanceof Error ? err.message : String(err)}\n`
+    );
+  }
+
+  // Primary file failed — try the .bak file created by writeCrons().
+  const bakPath = filePath + '.bak';
+  if (existsSync(bakPath)) {
+    process.stderr.write(
+      `[crons] WARNING: falling back to crons.json.bak for agent "${agentName}"\n`
+    );
+    try {
+      const bakRaw = readFileSync(bakPath, 'utf-8');
+      const bakCrons = parseCronsRaw(bakRaw, agentName, 'crons.json.bak');
+      if (bakCrons !== null) {
+        return bakCrons;
+      }
+    } catch (err) {
+      process.stderr.write(
+        `[crons] WARNING: failed to read crons.json.bak for agent "${agentName}" — ` +
+          `${err instanceof Error ? err.message : String(err)}\n`
+      );
+    }
+  }
+
+  return [];
 }
 
 /**
  * Write (replace) all cron definitions for an agent atomically.
  *
  * Always updates the envelope's `updated_at` to the current UTC time.
+ * Passes `keepBak = true` to `atomicWriteSync` so the previous crons.json is
+ * preserved as `crons.json.bak` before the new file is written.  This enables
+ * automatic recovery in `readCrons()` on parse failure.
  */
 export function writeCrons(agentName: string, crons: CronDefinition[]): void {
   const filePath = cronsFilePath(agentName);
@@ -93,7 +139,7 @@ export function writeCrons(agentName: string, crons: CronDefinition[]): void {
     updated_at: new Date().toISOString(),
     crons,
   };
-  atomicWriteSync(filePath, JSON.stringify(envelope, null, 2));
+  atomicWriteSync(filePath, JSON.stringify(envelope, null, 2), /* keepBak= */ true);
 }
 
 /**

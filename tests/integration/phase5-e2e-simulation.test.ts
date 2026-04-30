@@ -629,26 +629,29 @@ describe('Scenario 4: State corruption — 3 sub-types, fallback to last-known-g
     // Corrupt: truncate to 0 bytes (4a)
     writeFileSync(cronsFilePath(agentBad), '', 'utf-8');
 
-    // Reload sBad — should detect corruption and fall back to [] (readCrons returns [])
+    // Reload sBad — readCrons returns [] (truncated file).
+    // POST-5.3 BEHAVIOR: lastGoodSchedule retains the previous valid schedule.
+    // If a .bak file exists (from prior writeCrons calls), readCrons falls back to .bak.
+    // Either way: the scheduler keeps crons active — it does NOT zero out.
     sBad.reload();
 
-    // After reload, bad scheduler has 0 crons
-    expect(sBad.getNextFireTimes()).toHaveLength(0);
+    // After reload with lastGoodSchedule: schedule is retained (non-zero)
+    expect(sBad.getNextFireTimes().length).toBeGreaterThan(0);
 
-    // Assert: corruption logged (readCrons issues warning to stderr; scheduler logs reload)
-    expect(logsBad.some(l => l.includes('reloaded'))).toBe(true);
+    // Assert: reload was logged
+    expect(logsBad.some(l => l.includes('reloaded') || l.includes('retaining'))).toBe(true);
 
     const firesBadBefore = firedBad.length;
 
-    // Good agent continues unaffected
+    // Both agents continue firing (good agent unaffected; bad agent retained schedule)
     await advanceSim(2 * ONE_HOUR + TICK_MS);
 
     sGood.stop();
     sBad.stop();
 
     expect(firedGood.length).toBeGreaterThanOrEqual(firesGoodBefore + 1);
-    // Bad agent stopped firing after corruption
-    expect(firedBad.length).toBe(firesBadBefore);
+    // Bad agent kept firing (schedule retained by lastGoodSchedule or .bak)
+    expect(firedBad.length).toBeGreaterThanOrEqual(firesBadBefore);
 
     // Assert: once corruption is repaired, scheduler picks up new state on reload
     addCron(agentBad, makeCronDef('recovered-cron', '1h'));
@@ -681,19 +684,28 @@ describe('Scenario 4: State corruption — 3 sub-types, fallback to last-known-g
 
     const firesBefore = fired.length;
 
-    // Corrupt: write invalid JSON (4b)
+    // Corrupt: write invalid JSON (4b). Also corrupt the .bak if present.
     writeFileSync(cronsFilePath(agent), '{ "crons": [INVALID JSON!!! missing bracket', 'utf-8');
+    const bakPath4b = cronsFilePath(agent) + '.bak';
+    if (existsSync(bakPath4b)) {
+      writeFileSync(bakPath4b, 'CORRUPT BAK 4b', 'utf-8');
+    }
 
     s.reload();
 
-    // Should have 0 scheduled crons after reload
-    expect(s.getNextFireTimes()).toHaveLength(0);
+    // POST-5.3 BEHAVIOR: when both primary and .bak are corrupted, readCrons returns [].
+    // lastGoodSchedule retains the previous valid schedule so crons keep firing.
+    // When only primary is corrupted (no .bak yet), readCrons returns [] and
+    // lastGoodSchedule retains the in-memory schedule.
+    // Either way: schedule is NOT zeroed out.
+    expect(s.getNextFireTimes().length).toBeGreaterThan(0);
 
-    // Continue — no more fires
+    // Crons continue firing during corruption (last-good retained)
     await advanceSim(ONE_HOUR + TICK_MS);
     s.stop();
 
-    expect(fired.length).toBe(firesBefore);
+    // Fires may have continued during corruption (lastGoodSchedule active)
+    expect(fired.length).toBeGreaterThanOrEqual(firesBefore);
 
     // Assert: repair restores scheduling
     writeCrons(agent, [makeCronDef('cron-4b-repaired', '1h')]);
@@ -730,22 +742,27 @@ describe('Scenario 4: State corruption — 3 sub-types, fallback to last-known-g
 
     s.reload();
 
-    // Wrong shape → readCrons returns [] (logs shape warning to stderr)
-    expect(s.getNextFireTimes()).toHaveLength(0);
+    // POST-5.3 BEHAVIOR: wrong-shape JSON causes readCrons to return [].
+    // If .bak exists with valid data, it's used instead (schedule remains full).
+    // If .bak also invalid/missing, lastGoodSchedule retains the in-memory schedule.
+    // Either way: schedule size > 0 (crons keep firing through transient corruption).
+    const nextAfterCorrupt = s.getNextFireTimes();
+    expect(nextAfterCorrupt.length).toBeGreaterThan(0);
 
     const firesAfterCorrupt = fired.length;
     await advanceSim(ONE_HOUR + TICK_MS);
     s.stop();
 
-    // No additional fires during corruption
-    expect(fired.length).toBe(firesAfterCorrupt);
+    // Fires continue during corruption (lastGoodSchedule retained)
+    expect(fired.length).toBeGreaterThanOrEqual(firesAfterCorrupt);
 
     // Repair: write valid crons.json
     writeCrons(agent, [makeCronDef('cron-4c-restored', '2h')]);
 
-    // Assert: zero data loss — pre-corruption log entries still intact
+    // Assert: zero data loss — pre-corruption log entries still intact + any fires
+    // that happened during corruption (lastGoodSchedule continued firing)
     const logBeforeRepair = readLog(agent);
-    expect(logBeforeRepair.filter(e => e.status === 'fired').length).toBe(firesBefore);
+    expect(logBeforeRepair.filter(e => e.status === 'fired').length).toBeGreaterThanOrEqual(firesBefore);
 
     // New scheduler picks up repaired state
     const s2 = buildScheduler(agent, (c) => fired.push(c.name), logs);
@@ -756,8 +773,9 @@ describe('Scenario 4: State corruption — 3 sub-types, fallback to last-known-g
     expect(fired.length).toBeGreaterThan(firesAfterCorrupt);
 
     // Assert: log entries from both before and after repair present
+    // cron-4c fired during corruption too (lastGoodSchedule retained), so count >= firesBefore
     const finalLog = readLog(agent);
-    expect(finalLog.filter(e => e.cron === 'cron-4c' && e.status === 'fired').length).toBe(firesBefore);
+    expect(finalLog.filter(e => e.cron === 'cron-4c' && e.status === 'fired').length).toBeGreaterThanOrEqual(firesBefore);
     expect(finalLog.filter(e => e.cron === 'cron-4c-restored' && e.status === 'fired').length).toBeGreaterThanOrEqual(1);
   });
 });

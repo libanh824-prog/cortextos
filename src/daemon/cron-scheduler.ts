@@ -246,6 +246,19 @@ export class CronScheduler {
   /** In-memory schedule, keyed by cron name. */
   private scheduled: Map<string, ScheduledCron> = new Map();
 
+  /**
+   * Snapshot of the last successfully loaded non-empty schedule.
+   *
+   * Updated every time `loadCrons()` produces a non-empty result.  When a
+   * subsequent reload produces an empty result (e.g. transient corruption),
+   * the scheduler keeps firing the last-good schedule and logs a warning
+   * instead of silently dropping all cron definitions.
+   *
+   * This snapshot is only held in memory — it does NOT persist across process
+   * restarts (see PHASE5-FAILURE-MODES-REPORT.md for design rationale).
+   */
+  private lastGoodSchedule: Map<string, ScheduledCron> = new Map();
+
   /** The master 30-second interval handle. */
   private tickHandle: ReturnType<typeof setInterval> | null = null;
 
@@ -363,7 +376,29 @@ export class CronScheduler {
       nextScheduled.set(def.name, { definition: def, nextFireAt, changeKey: key });
     }
 
+    // LAST-GOOD-SCHEDULE FALLBACK
+    // If this is a reload and the result is empty (all-zero defs, parse failure,
+    // or external corruption), retain the previous in-memory schedule instead of
+    // silently dropping all cron definitions.  This prevents transient corruption
+    // from halting cron execution on a running scheduler.
+    //
+    // We do NOT apply this fallback on initial start() — an empty file on startup
+    // is normal (no crons registered yet) and should produce an empty schedule.
+    if (isReload && nextScheduled.size === 0 && this.lastGoodSchedule.size > 0) {
+      this.logger(
+        `[cron-scheduler] WARNING: reload produced empty schedule for agent "${this.agentName}" — ` +
+        `retaining last-good schedule (${this.lastGoodSchedule.size} cron(s)) until file is repaired`
+      );
+      this.scheduled = new Map(this.lastGoodSchedule);
+      return;
+    }
+
     this.scheduled = nextScheduled;
+
+    // Update the last-good snapshot whenever we get a non-empty result.
+    if (nextScheduled.size > 0) {
+      this.lastGoodSchedule = new Map(nextScheduled);
+    }
   }
 
   private async tick(): Promise<void> {
@@ -387,13 +422,24 @@ export class CronScheduler {
       const success = await fireWithRetry(cron, this.agentName, this.onFire, this.logger);
 
       if (success) {
-        // Persist last_fired_at + fire_count to disk
+        // Persist last_fired_at + fire_count to disk.
+        // updateCron writes through atomicWriteSync and can throw ENOSPC or
+        // EACCES (disk full / read-only filesystem).  These errors must not
+        // crash the tick loop — we log and keep the in-memory schedule intact.
         const nowIso = new Date(now).toISOString();
         const newFireCount = (cron.fire_count ?? 0) + 1;
-        updateCron(this.agentName, name, {
-          last_fired_at: nowIso,
-          fire_count: newFireCount,
-        });
+        try {
+          updateCron(this.agentName, name, {
+            last_fired_at: nowIso,
+            fire_count: newFireCount,
+          });
+        } catch (err) {
+          this.logger(
+            `[cron-scheduler] WARNING: failed to persist fire state for "${name}" — ` +
+            `${err instanceof Error ? err.message : String(err)}. ` +
+            `In-memory schedule retained; state will be lost if daemon restarts.`
+          );
+        }
 
         // Advance in-memory nextFireAt
         const next = computeNextFireAt(cron, now);

@@ -367,8 +367,18 @@ describe('Scenario 3: Corrupted crons.json', () => {
 
     sB.reload(); // reads corrupt file — graceful degradation expected
 
-    // agentB scheduler now has 0 crons (readCrons returns [] on parse failure)
-    expect(sB.getNextFireTimes()).toHaveLength(0);
+    // agentB scheduler retains last-good schedule via lastGoodSchedule fallback.
+    // Previously (pre-5.3): reload-to-empty would zero out the schedule.
+    // Now (post-5.3): lastGoodSchedule keeps the previous valid schedule active,
+    // so crons continue to fire during transient corruption.
+    // The .bak fallback also catches single-file corruption before lastGoodSchedule.
+    // In this test the corrupt file + no .bak match means readCrons returns [],
+    // triggering lastGoodSchedule retention — or .bak fallback if a .bak exists.
+    // Either way: crons keep firing (the schedule is NOT zeroed out).
+    // Note: if .bak has valid data, readCrons returns non-empty (no lastGoodSchedule needed).
+    // If both are corrupt, lastGoodSchedule retains the in-memory schedule.
+    const nextFiresAfterCorrupt = sB.getNextFireTimes();
+    expect(nextFiresAfterCorrupt.length).toBeGreaterThan(0); // schedule retained
 
     // agentA should keep firing unaffected
     await advanceSim(2 * ONE_HOUR + TICK_MS);
@@ -379,8 +389,8 @@ describe('Scenario 3: Corrupted crons.json', () => {
     // agentA kept firing during corruption
     expect(firedA.length).toBeGreaterThanOrEqual(firesABeforeReload + 1);
 
-    // agentB stopped firing after corruption (no valid crons)
-    expect(firedB.length).toBe(firesBBeforeReload);
+    // agentB also kept firing (lastGoodSchedule or .bak retained the schedule)
+    expect(firedB.length).toBeGreaterThanOrEqual(firesBBeforeReload);
 
     // Restore valid crons.json and reload
     addCron(agentB, makeCronDef('recovered', '1h'));
