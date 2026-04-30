@@ -2,6 +2,24 @@ import { createConnection } from 'net';
 import { homedir } from 'os';
 import { join } from 'path';
 
+export type ExecutionLogStatusFilter = 'all' | 'success' | 'failure';
+
+export interface CronExecutionLogEntry {
+  ts: string;
+  cron: string;
+  status: 'fired' | 'retried' | 'failed';
+  attempt: number;
+  duration_ms: number;
+  error: string | null;
+}
+
+/** Paginated response for list-cron-executions IPC command (Subtask 4.3). */
+export interface CronExecutionLogPage {
+  entries: CronExecutionLogEntry[];
+  total: number;
+  hasMore: boolean;
+}
+
 export interface IPCRequest {
   type:
     | 'status'

@@ -4,7 +4,8 @@ import { join, resolve as pathResolve } from 'path';
 import type { IPCRequest, IPCResponse, CronSummaryRow, CronDefinition } from '../types/index.js';
 import { AgentManager } from './agent-manager.js';
 import { getIpcPath } from '../utils/paths.js';
-import { readCrons, getExecutionLog, addCron, updateCron, removeCron } from '../bus/crons.js';
+import { readCrons, getExecutionLogPage, addCron, updateCron, removeCron } from '../bus/crons.js';
+import type { ExecutionLogStatusFilter } from '../bus/crons.js';
 import { nextFireFromCron } from './cron-scheduler.js';
 import { parseDurationMs } from '../bus/cron-state.js';
 
@@ -562,12 +563,18 @@ export class IPCServer {
         case 'list-cron-executions': {
           const execAgent = request.agent;
           const execCronName = request.data?.cronName as string | undefined;
-          const execLimit = typeof request.data?.limit === 'number' ? request.data.limit : 50;
+          const execLimit = typeof request.data?.limit === 'number' ? request.data.limit : 100;
+          const execOffset = typeof request.data?.offset === 'number' ? request.data.offset : 0;
+          const rawStatusFilter = request.data?.statusFilter as string | undefined;
+          const execStatusFilter: ExecutionLogStatusFilter =
+            rawStatusFilter === 'success' || rawStatusFilter === 'failure'
+              ? rawStatusFilter
+              : 'all';
           if (!execAgent) {
             response = { success: false, error: 'list-cron-executions requires agent name' };
           } else {
-            const entries = getExecutionLog(execAgent, execCronName, execLimit);
-            response = { success: true, data: entries };
+            const page = getExecutionLogPage(execAgent, execCronName, execLimit, execOffset, execStatusFilter);
+            response = { success: true, data: page };
           }
           break;
         }

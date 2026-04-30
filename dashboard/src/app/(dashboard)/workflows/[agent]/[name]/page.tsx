@@ -5,14 +5,13 @@
  *
  * Renders:
  *  1. CronForm in edit mode (pre-populated from existing cron data)
- *  2. Recent execution history (inline table)
+ *  2. Full execution history via CronHistory component (Subtask 4.3)
  *  3. Delete button with confirmation dialog
  */
 
 import { useState, useEffect, useCallback, use } from 'react';
 import { useRouter } from 'next/navigation';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
-import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import {
   IconArrowLeft,
@@ -22,8 +21,8 @@ import {
   IconRefresh,
 } from '@tabler/icons-react';
 import CronForm, { type CronFormValues } from '@/components/workflows/cron-form';
+import CronHistory from '@/components/workflows/cron-history';
 import DeleteCronDialog from '@/components/workflows/delete-cron-dialog';
-import { formatRelative } from '@/lib/cron-utils';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -49,28 +48,6 @@ interface CronSummaryRow {
   nextFire: string;
 }
 
-interface CronExecutionEntry {
-  ts: string;
-  cron: string;
-  status: 'fired' | 'retried' | 'failed';
-  attempt: number;
-  duration_ms: number;
-  error: string | null;
-}
-
-// ---------------------------------------------------------------------------
-// Status helpers
-// ---------------------------------------------------------------------------
-
-function statusBadgeVariant(
-  status: 'fired' | 'retried' | 'failed' | null,
-): 'default' | 'secondary' | 'destructive' | 'outline' {
-  if (status === 'fired') return 'default';
-  if (status === 'failed') return 'destructive';
-  if (status === 'retried') return 'secondary';
-  return 'outline';
-}
-
 // ---------------------------------------------------------------------------
 // Page component
 // ---------------------------------------------------------------------------
@@ -86,9 +63,7 @@ export default function CronDetailPage({
   const router = useRouter();
 
   const [cronRow, setCronRow] = useState<CronSummaryRow | null>(null);
-  const [executions, setExecutions] = useState<CronExecutionEntry[]>([]);
   const [loading, setLoading] = useState(true);
-  const [execLoading, setExecLoading] = useState(false);
   const [deleteOpen, setDeleteOpen] = useState(false);
   const [agents, setAgents] = useState<string[]>([agent]);
 
@@ -111,23 +86,6 @@ export default function CronDetailPage({
     }
   }, [agent, cronName]);
 
-  // Fetch execution history
-  const fetchExecutions = useCallback(async () => {
-    setExecLoading(true);
-    try {
-      const url = `/api/workflows/crons/${encodeURIComponent(agent)}/executions?cronName=${encodeURIComponent(cronName)}&limit=20`;
-      const res = await fetch(url);
-      if (res.ok) {
-        const data: CronExecutionEntry[] = await res.json();
-        setExecutions([...data].reverse()); // most recent first
-      }
-    } catch (err) {
-      console.error('[cron-detail] executions fetch failed:', err);
-    } finally {
-      setExecLoading(false);
-    }
-  }, [agent, cronName]);
-
   // Fetch enabled agents list for the form
   const fetchAgents = useCallback(async () => {
     try {
@@ -143,13 +101,11 @@ export default function CronDetailPage({
 
   useEffect(() => {
     fetchCron();
-    fetchExecutions();
     fetchAgents();
-  }, [fetchCron, fetchExecutions, fetchAgents]);
+  }, [fetchCron, fetchAgents]);
 
   const handleEditSuccess = () => {
     fetchCron();
-    fetchExecutions();
   };
 
   const handleDelete = async () => {
@@ -159,7 +115,7 @@ export default function CronDetailPage({
     );
     if (!res.ok) {
       const data = await res.json().catch(() => ({}));
-      throw new Error(data.error ?? 'Failed to delete cron.');
+      throw new Error((data as { error?: string }).error ?? 'Failed to delete cron.');
     }
     router.push('/workflows');
   };
@@ -177,7 +133,7 @@ export default function CronDetailPage({
     : undefined;
 
   return (
-    <div className="space-y-6 max-w-2xl mx-auto">
+    <div className="space-y-6 max-w-3xl mx-auto">
       {/* Back nav */}
       <div className="flex items-center gap-3">
         <button
@@ -210,11 +166,11 @@ export default function CronDetailPage({
           )}
         </div>
         <button
-          onClick={() => { fetchCron(); fetchExecutions(); }}
+          onClick={fetchCron}
           className="p-2 rounded-md hover:bg-muted transition-colors shrink-0"
           title="Refresh"
         >
-          <IconRefresh size={15} className={(loading || execLoading) ? 'animate-spin' : ''} />
+          <IconRefresh size={15} className={loading ? 'animate-spin' : ''} />
         </button>
       </div>
 
@@ -241,58 +197,16 @@ export default function CronDetailPage({
         </CardContent>
       </Card>
 
-      {/* Execution history */}
+      {/* Full execution history — CronHistory component (Subtask 4.3) */}
       <Card>
         <CardHeader className="pb-3">
           <CardTitle className="text-base flex items-center gap-2">
             <IconHistory size={16} />
-            Recent Executions
+            Execution History
           </CardTitle>
         </CardHeader>
         <CardContent className="pt-0">
-          {execLoading ? (
-            <p className="text-sm text-muted-foreground py-4">Loading...</p>
-          ) : executions.length === 0 ? (
-            <p className="text-sm text-muted-foreground py-4 text-center">
-              No executions recorded yet.
-            </p>
-          ) : (
-            <div className="overflow-x-auto">
-              <table className="w-full text-sm">
-                <thead>
-                  <tr className="border-b text-left">
-                    <th className="pb-2 pr-4 text-xs font-medium text-muted-foreground uppercase tracking-wide">When</th>
-                    <th className="pb-2 pr-4 text-xs font-medium text-muted-foreground uppercase tracking-wide">Status</th>
-                    <th className="pb-2 pr-4 text-xs font-medium text-muted-foreground uppercase tracking-wide">Duration</th>
-                    <th className="pb-2 text-xs font-medium text-muted-foreground uppercase tracking-wide">Error</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {executions.map((entry, i) => (
-                    <tr key={i} className="border-b last:border-0">
-                      <td className="py-2 pr-4 text-xs text-muted-foreground">
-                        {formatRelative(entry.ts)}
-                      </td>
-                      <td className="py-2 pr-4">
-                        <Badge
-                          variant={statusBadgeVariant(entry.status)}
-                          className="text-[10px]"
-                        >
-                          {entry.status}
-                        </Badge>
-                      </td>
-                      <td className="py-2 pr-4 text-xs text-muted-foreground">
-                        {entry.duration_ms}ms
-                      </td>
-                      <td className="py-2 text-xs text-destructive">
-                        {entry.error ?? ''}
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          )}
+          <CronHistory agent={agent} cronName={cronName} />
         </CardContent>
       </Card>
 

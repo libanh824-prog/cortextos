@@ -170,12 +170,37 @@ export function getCronByName(
 // ---------------------------------------------------------------------------
 
 /**
+ * Status filter for execution log queries.
+ * - 'all'     — no status filtering (default)
+ * - 'success' — only 'fired' entries
+ * - 'failure' — only 'failed' entries
+ */
+export type ExecutionLogStatusFilter = 'all' | 'success' | 'failure';
+
+/**
+ * Paginated result returned by getExecutionLog when offset is provided.
+ */
+export interface ExecutionLogPage {
+  /** Entries for this page (most-recent last order preserved). */
+  entries: CronExecutionLogEntry[];
+  /** Total number of entries matching the cronName + statusFilter. */
+  total: number;
+  /** True when there are more entries before this page (i.e. offset + entries.length < total). */
+  hasMore: boolean;
+}
+
+/**
  * Read the cron execution log for an agent.
  *
- * @param agentName - Agent whose log file to read.
- * @param cronName  - Optional: if provided, return only entries for this cron.
- * @param limit     - Maximum number of entries to return (most-recent last).
- *                    Defaults to 50.  Pass 0 for all entries.
+ * @param agentName    - Agent whose log file to read.
+ * @param cronName     - Optional: if provided, return only entries for this cron.
+ * @param limit        - Maximum number of entries to return (most-recent last).
+ *                       Defaults to 50.  Pass 0 for all entries.
+ * @param offset       - Number of matching entries to skip from the most-recent end
+ *                       before taking `limit`.  Used for pagination.
+ *                       Defaults to 0 (start from most-recent).
+ * @param statusFilter - Optional status filter: 'success' (fired only), 'failure' (failed only),
+ *                       or 'all' (default, no filtering).
  * @returns Array of log entries.  Returns [] if the log file doesn't exist.
  *          Malformed JSONL lines are silently skipped.
  */
@@ -183,40 +208,85 @@ export function getExecutionLog(
   agentName: string,
   cronName?: string,
   limit = 50,
+  offset = 0,
+  statusFilter: ExecutionLogStatusFilter = 'all',
 ): CronExecutionLogEntry[] {
+  return getExecutionLogPage(agentName, cronName, limit, offset, statusFilter).entries;
+}
+
+/**
+ * Read the cron execution log for an agent, returning full pagination metadata.
+ *
+ * Identical to getExecutionLog but returns an ExecutionLogPage with total + hasMore.
+ *
+ * @param agentName    - Agent whose log file to read.
+ * @param cronName     - Optional: if provided, return only entries for this cron.
+ * @param limit        - Max entries per page.  Defaults to 100.  0 = all.
+ * @param offset       - Entries to skip from the most-recent end.  Defaults to 0.
+ * @param statusFilter - 'all' | 'success' | 'failure'.  Defaults to 'all'.
+ * @returns ExecutionLogPage with entries, total, and hasMore.
+ */
+export function getExecutionLogPage(
+  agentName: string,
+  cronName?: string,
+  limit = 100,
+  offset = 0,
+  statusFilter: ExecutionLogStatusFilter = 'all',
+): ExecutionLogPage {
   const ctxRoot = process.env.CTX_ROOT ?? process.cwd();
   const filePath = join(ctxRoot, cronExecutionLogPathFor(agentName));
 
   if (!existsSync(filePath)) {
-    return [];
+    return { entries: [], total: 0, hasMore: false };
   }
 
   let raw: string;
   try {
     raw = readFileSync(filePath, 'utf-8');
   } catch {
-    return [];
+    return { entries: [], total: 0, hasMore: false };
   }
 
-  const entries: CronExecutionLogEntry[] = [];
+  const allEntries: CronExecutionLogEntry[] = [];
   for (const line of raw.split('\n')) {
     const trimmed = line.trim();
     if (!trimmed) continue;
     try {
-      entries.push(JSON.parse(trimmed) as CronExecutionLogEntry);
+      allEntries.push(JSON.parse(trimmed) as CronExecutionLogEntry);
     } catch {
       // Skip malformed lines
     }
   }
 
-  // Optional filter by cron name
-  const filtered = cronName !== undefined
-    ? entries.filter(e => e.cron === cronName)
-    : entries;
+  // Filter by cron name
+  let filtered = cronName !== undefined
+    ? allEntries.filter(e => e.cron === cronName)
+    : allEntries;
 
-  // Return last `limit` entries (most recent last), or all if limit <= 0
-  if (limit > 0 && filtered.length > limit) {
-    return filtered.slice(filtered.length - limit);
+  // Apply status filter
+  if (statusFilter === 'success') {
+    filtered = filtered.filter(e => e.status === 'fired');
+  } else if (statusFilter === 'failure') {
+    filtered = filtered.filter(e => e.status === 'failed');
   }
-  return filtered;
+
+  const total = filtered.length;
+
+  // Entries are stored oldest-first; we want most-recent at the front for pagination.
+  // offset=0 means "most recent N entries", offset=N means "next N older entries".
+  // Slice from the end: the window is [total - offset - limit, total - offset)
+  if (limit <= 0) {
+    // Return all, respecting offset only
+    const safeOffset = Math.min(offset, total);
+    const entries = filtered.slice(0, total - safeOffset);
+    return { entries, total, hasMore: false };
+  }
+
+  const safeOffset = Math.max(0, Math.min(offset, total));
+  const end = total - safeOffset;
+  const start = Math.max(0, end - limit);
+  const entries = filtered.slice(start, end);
+  const hasMore = start > 0;
+
+  return { entries, total, hasMore };
 }

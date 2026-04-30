@@ -579,6 +579,21 @@ export type IPCCommandType =
   | 'remove-cron';
 
 // ---------------------------------------------------------------------------
+// Execution log pagination response — Subtask 4.3
+// ---------------------------------------------------------------------------
+
+/**
+ * Paginated response for list-cron-executions IPC command.
+ */
+export interface CronExecutionLogPage {
+  entries: CronExecutionLogEntry[];
+  /** Total matching entries (after cronName + statusFilter applied). */
+  total: number;
+  /** True when there are more entries older than this page. */
+  hasMore: boolean;
+}
+
+// ---------------------------------------------------------------------------
 // list-all-crons response shape — Subtask 4.1
 // ---------------------------------------------------------------------------
 
