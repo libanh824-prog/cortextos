@@ -368,6 +368,21 @@ export class CronScheduler {
         continue;
       }
 
+      // RELOAD-WHILE-FIRING GUARD: if the cron is mid-fire, preserve the
+      // existing entry as-is until the fire completes.  A fresh ScheduledCron
+      // built from stale crons.json (last_fired_at not yet persisted) would
+      // catch-up-fire on the next tick and double-fire the same logical event.
+      // The next reload (manual or after fire completes) will pick up the
+      // new schedule cleanly.
+      if (isReload && existing !== undefined && existing.firing === true) {
+        this.logger(
+          `[cron-scheduler] reload deferred for "${def.name}" — fire in progress; ` +
+          `new schedule will apply on next reload after fire completes`
+        );
+        nextScheduled.set(def.name, existing);
+        continue;
+      }
+
       // New or modified cron — compute fresh nextFireAt.
       // Base: take the most recent of crons.json.last_fired_at and
       // cron-state.json.last_fire (either may be more current depending on

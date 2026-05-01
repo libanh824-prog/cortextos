@@ -383,6 +383,65 @@ describe('CronScheduler', () => {
   });
 
   // -------------------------------------------------------------------------
+  // reload() during in-flight fire — race condition probe
+  //
+  // If reload() runs while a fire's onFire is awaiting, the old ScheduledCron
+  // reference held by tick() becomes orphaned (the new map holds a fresh
+  // object with firing=false default).  If the cron's definition changed
+  // (e.g. schedule shortened), the fresh ScheduledCron computes nextFireAt
+  // from the stale last_fired_at in crons.json — which has not yet been
+  // updated because the in-flight fire's persist call hasn't run.  Result:
+  // the next tick can re-fire the same logical event.
+  // -------------------------------------------------------------------------
+
+  it('reload() during in-flight fire with changed schedule does not cause double-fire', async () => {
+    // Slow onFire we can resolve manually
+    let resolveFire: (() => void) | undefined;
+    const slowFire = vi.fn().mockImplementation(() => new Promise<void>((res) => { resolveFire = res; }));
+
+    const raceLogs: string[] = [];
+    const raceScheduler = new CronScheduler({
+      agentName: 'test-agent',
+      onFire: slowFire,
+      logger: (msg) => raceLogs.push(msg),
+    });
+
+    // Start with a cron that fires immediately (catch-up)
+    const tenMinAgo = new Date(Date.now() - 10 * 60_000).toISOString();
+    mockReadCrons.mockReturnValue([
+      makeCron({ name: 'racy', schedule: '10m', last_fired_at: tenMinAgo, fire_count: 1 }),
+    ]);
+
+    raceScheduler.start();
+
+    // First tick: catch-up fires, awaits our slow Promise
+    await vi.advanceTimersByTimeAsync(TICK);
+    expect(slowFire).toHaveBeenCalledTimes(1);
+
+    // Mid-fire: reload with a SHORTER schedule (changeKey differs).
+    // crons.json's last_fired_at is still the stale 10-min-ago value
+    // because the in-flight fire's persist hasn't run yet.
+    mockReadCrons.mockReturnValue([
+      makeCron({ name: 'racy', schedule: '1m', last_fired_at: tenMinAgo, fire_count: 1 }),
+    ]);
+    raceScheduler.reload();
+
+    // Resolve the in-flight fire so the original tick completes
+    resolveFire!();
+    await vi.advanceTimersByTimeAsync(0); // flush microtasks
+
+    // Advance one more tick. The bug: new ScheduledCron's catch-up
+    // (referenceMs = stale last_fired_at + 1m schedule = past) re-fires
+    // the same logical event.
+    await vi.advanceTimersByTimeAsync(TICK);
+
+    // Should be exactly 1 fire — the original. Bug repro: we'd see 2.
+    expect(slowFire).toHaveBeenCalledTimes(1);
+
+    raceScheduler.stop();
+  });
+
+  // -------------------------------------------------------------------------
   // Catch-up on start
   // -------------------------------------------------------------------------
 
