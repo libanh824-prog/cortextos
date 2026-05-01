@@ -96,9 +96,11 @@ describe('migrateCronsForAgent — cron-teaching upgrade banner', () => {
       l.includes('cron-teaching upgrade recommended'),
     );
     expect(banner).toBeDefined();
-    expect(banner).toContain('[banner-test]');
     expect(banner).toContain('cortextos bus upgrade-cron-teaching banner-test');
     expect(banner).toMatch(/\d+ stale references in \d+ files/);
+    // The agent name is provided by the caller's logger (e.g. daemon wraps with
+    // [<agent>] [migration]). The migration module itself must not duplicate it.
+    expect(banner!.startsWith('cron-teaching upgrade recommended')).toBe(true);
 
     // Marker dropped so the next run is silent.
     expect(isTeachingChecked(tmpCtxRoot, 'banner-test')).toBe(true);
@@ -251,6 +253,6 @@ describe('migrateCronsForAgent — cron-teaching upgrade banner', () => {
       l.includes('cron-teaching upgrade recommended'),
     );
     expect(banner).toBeDefined();
-    expect(banner).toContain('[banner-test]');
+    expect(banner).toContain('cortextos bus upgrade-cron-teaching banner-test');
   });
 });

@@ -141,7 +141,7 @@ function runTeachingCheck(args: TeachingCheckArgs): void {
   if (result.matches.length > 0) {
     const fileCount = new Set(result.matches.map((m) => m.file)).size;
     args.log(
-      `[${args.agentName}] cron-teaching upgrade recommended: ${result.matches.length} stale references in ${fileCount} files. ` +
+      `cron-teaching upgrade recommended: ${result.matches.length} stale references in ${fileCount} files. ` +
         `Run cortextos bus upgrade-cron-teaching ${args.agentName}`,
     );
   }
@@ -291,7 +291,7 @@ export function migrateCronsForAgent(
     });
   } catch (err) {
     log(
-      `[${agentName}] cron-teaching scan failed (non-fatal): ${err instanceof Error ? err.message : String(err)}`,
+      `cron-teaching scan failed (non-fatal): ${err instanceof Error ? err.message : String(err)}`,
     );
   }
 
