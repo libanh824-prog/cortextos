@@ -576,6 +576,82 @@ describe('CronScheduler', () => {
   });
 
   // -------------------------------------------------------------------------
+  // Iter 10 audit: daemon-crash mid-fire double-fire risk
+  //
+  // BUG (pinned below; fix candidate iter 11): if the daemon crashes between
+  // sc.firing=true (cron-scheduler.ts:466) and the post-success updateCron
+  // persist (cron-scheduler.ts:480), nothing on disk records that the fire
+  // happened. On restart, loadCrons computes referenceMs from the STALE
+  // crons.json.last_fired_at and cron-state.json.last_fire (neither was
+  // updated for the in-flight fire). The catch-up gate (line 408) sees
+  // nextFireAt in the past and fires AGAIN — same logical scheduled tick,
+  // two prompt injections.
+  //
+  // sc.firing is in-memory only — there is no firing_started_at /
+  // last_fire_attempted_at field on disk that loadCrons could check. The
+  // reload-while-firing guard at line 377 protects against IPC reloads
+  // mid-fire but NOT against process-level crashes.
+  //
+  // Fix sketch (iter 11): persist `last_fire_attempted_at` to crons.json
+  // BEFORE awaiting onFire, and include it in loadCrons's `candidates` for
+  // referenceMs. Crash mid-fire → restart sees attempted_at = "now" → no
+  // catch-up. Tradeoff: a fire whose dispatch genuinely failed before the
+  // current process crashed will be skipped one window — acceptable
+  // because the alternative (double-fire on every crash) is worse.
+  // -------------------------------------------------------------------------
+
+  it('iter 10 audit: daemon crash mid-fire causes double-fire on restart (pinned)', async () => {
+    const oneHourAgo = new Date(Date.now() - 60 * 60_000).toISOString();
+    mockReadCrons.mockReturnValue([
+      makeCron({ name: 'daily-job', schedule: '1h', last_fired_at: oneHourAgo, fire_count: 5 }),
+    ]);
+
+    // Slow onFire we never resolve — simulates "fire began, agent received
+    // the prompt, daemon crashed before the persist call could write
+    // last_fired_at = T."
+    let _resolveFire: (() => void) | undefined;
+    const slowFire = vi.fn().mockImplementation(() => new Promise<void>((res) => { _resolveFire = res; }));
+
+    const scheduler1 = new CronScheduler({
+      agentName: 'test-agent',
+      onFire: slowFire,
+      logger: (m) => logs.push(m),
+    });
+
+    scheduler1.start();
+    await vi.advanceTimersByTimeAsync(TICK);
+    expect(slowFire).toHaveBeenCalledTimes(1);
+    // Crash before the persist runs: updateCron has NOT been called.
+    expect(mockUpdateCron).not.toHaveBeenCalled();
+
+    // Simulate the crash: stop scheduler 1 without resolving the in-flight
+    // fire.  Disk state is unchanged (mockReadCrons still returns the stale
+    // last_fired_at = 1h ago).
+    scheduler1.stop();
+
+    // Restart: build a fresh scheduler with the same mocked disk state.
+    const scheduler2 = new CronScheduler({
+      agentName: 'test-agent',
+      onFire: slowFire,
+      logger: (m) => logs.push(m),
+    });
+    scheduler2.start();
+    await vi.advanceTimersByTimeAsync(TICK);
+
+    // CURRENT (buggy) BEHAVIOR: scheduler 2 catch-up fires the same logical
+    // tick — onFire is called a SECOND time.  Pinned here so iter 11's fix
+    // can flip the assertion.
+    expect(slowFire).toHaveBeenCalledTimes(2);
+
+    scheduler2.stop();
+  });
+
+  it.todo(
+    'iter 11: daemon crash mid-fire does NOT double-fire on restart ' +
+    '(persist last_fire_attempted_at before onFire so loadCrons sees the in-progress fire)'
+  );
+
+  // -------------------------------------------------------------------------
   // Catch-up on start
   // -------------------------------------------------------------------------
 
