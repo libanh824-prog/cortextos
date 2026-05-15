@@ -77,14 +77,22 @@ export async function GET(
     } catch { /* fall through to inbox scan */ }
   }
 
-  // Fallback: scan inbox directories for messages not yet in the history log
+  // Fallback: scan inbox + processed directories for agent-to-agent
+  // bus messages not present in the history log. The bus delivers
+  // messages to inbox/{agent}/ (or inflight/), and check-inbox /
+  // ack-inbox moves them to the TOP-LEVEL processed/{agent}/ —
+  // NOT inbox/{agent}/processed/. The previous form of this loop
+  // looked at inbox/{agent}/processed (which never exists), so
+  // ACK'd agent-to-agent messages were invisible in this view too.
   const seen = new Set<string>(messages.map(m => m.id));
   const inboxBase = path.join(ctxRoot, 'inbox');
+  const processedBase = path.join(ctxRoot, 'processed');
 
-  if (fs.existsSync(inboxBase)) {
+  for (const [base, subs] of [[inboxBase, ['inflight', '']], [processedBase, ['']]] as const) {
+    if (!fs.existsSync(base)) continue;
     for (const agent of [a1, a2]) {
-      for (const sub of ['processed', 'inflight', '']) {
-        const dir = sub ? path.join(inboxBase, agent, sub) : path.join(inboxBase, agent);
+      for (const sub of subs) {
+        const dir = sub ? path.join(base, agent, sub) : path.join(base, agent);
         if (!fs.existsSync(dir)) continue;
 
         let files: string[];

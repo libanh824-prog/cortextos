@@ -140,6 +140,26 @@ describe('GET /api/comms/channels', () => {
     expect(data[0].archived).toBe(false);
   });
 
+  it('surfaces agent-to-agent channels from processed/ when history log is absent', async () => {
+    // Regression for the bug L flagged: no message-history.jsonl, but
+    // 649 ACK'd agent-to-agent messages on disk in processed/{agent}/.
+    // The channels endpoint must scan inbox + processed (not just the
+    // history log + Telegram logs), otherwise the agent-to-agent pairs
+    // never appear in the channel list.
+    const t = new Date(Date.now() - 30 * 60 * 1000).toISOString();
+    const msg = { id: 'p1', from: 'boris', to: 'nick', priority: 'normal', timestamp: t, text: 'agent-to-agent', reply_to: null };
+    const procDir = path.join(rootTmp, 'processed', 'nick');
+    fs.mkdirSync(procDir, { recursive: true });
+    fs.writeFileSync(path.join(procDir, '2-1-from-boris-x.json'), JSON.stringify(msg));
+
+    const res = await channels.GET(makeRequest('/api/comms/channels'));
+    expect(res.status).toBe(200);
+    const data = await res.json();
+    expect(data).toHaveLength(1);
+    expect(data[0].pair).toBe('boris--nick');
+    expect(data[0].message_count).toBe(1);
+  });
+
   it('hides channels older than the archive threshold by default', async () => {
     writeHistory([
       { id: 'old', from: 'boris', to: 'nick', priority: 'normal', timestamp: '2020-01-01T00:00:00Z', text: 'ancient', reply_to: null },
