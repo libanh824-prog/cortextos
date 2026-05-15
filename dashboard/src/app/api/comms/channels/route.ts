@@ -65,6 +65,48 @@ export async function GET(request: NextRequest) {
     } catch { /* empty */ }
   }
 
+  // Fallback: scan inbox + processed directories for agent-to-agent
+  // bus messages not present in the history log. Without this scan,
+  // the channels endpoint sees only Telegram (admin↔agent) traffic
+  // and the agent-to-agent pairs (e.g. chief↔dev) never surface as
+  // channels even though the messages exist on disk. The bus writes
+  // delivered files to inbox/{agent}/ (and inflight/), and the
+  // recipient's ack-inbox moves them to processed/{agent}/ at the
+  // top level — NOT a subdirectory of inbox.
+  const processedBase = path.join(ctxRoot, 'processed');
+  for (const [base, subs] of [[inboxBase, ['inflight', '']], [processedBase, ['']]] as const) {
+    if (!fs.existsSync(base)) continue;
+    let agentDirs: string[];
+    try {
+      agentDirs = fs.readdirSync(base, { withFileTypes: true })
+        .filter(d => d.isDirectory())
+        .map(d => d.name);
+    } catch {
+      agentDirs = [];
+    }
+
+    for (const agent of agentDirs) {
+      for (const sub of subs) {
+        const dir = sub ? path.join(base, agent, sub) : path.join(base, agent);
+        if (!fs.existsSync(dir)) continue;
+        let files: string[];
+        try {
+          files = fs.readdirSync(dir).filter(f => f.endsWith('.json') && !f.startsWith('.'));
+        } catch { continue; }
+
+        for (const file of files) {
+          try {
+            const raw = fs.readFileSync(path.join(dir, file), 'utf-8');
+            const msg: BusMessage = JSON.parse(raw);
+            if (msg.id && msg.from && msg.to && msg.timestamp) {
+              allMessages.push(msg);
+            }
+          } catch { /* skip */ }
+        }
+      }
+    }
+  }
+
   // Include Telegram messages
   const logsBase = path.join(ctxRoot, 'logs');
   if (fs.existsSync(logsBase)) {
