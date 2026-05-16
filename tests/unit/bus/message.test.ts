@@ -93,6 +93,39 @@ describe('Message Bus', () => {
         sendMessage(senderPaths, '../bad', 'good', 'normal', 'test')
       ).toThrow();
     });
+
+    it('appends each delivered message as a JSONL line to logs/message-history.jsonl', () => {
+      // Backs task C1 — the dashboard /api/comms/* endpoints read
+      // message-history.jsonl as their primary source. Without this
+      // write the file never exists and every page load falls back
+      // to scanning processed/{agent}/ file-by-file.
+      sendMessage(senderPaths, 'sender', 'receiver', 'normal', 'one');
+      sendMessage(senderPaths, 'receiver', 'sender', 'high', 'two', '<reply-id>');
+
+      const logPath = join(testDir, 'logs', 'message-history.jsonl');
+      const lines = readFileSync(logPath, 'utf-8').trim().split('\n');
+      expect(lines).toHaveLength(2);
+
+      const first = JSON.parse(lines[0]);
+      expect(first).toMatchObject({
+        from: 'sender',
+        to: 'receiver',
+        priority: 'normal',
+        text: 'one',
+        reply_to: null,
+      });
+      expect(first.id).toBeTruthy();
+      expect(first.timestamp).toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/);
+
+      const second = JSON.parse(lines[1]);
+      expect(second).toMatchObject({
+        from: 'receiver',
+        to: 'sender',
+        priority: 'high',
+        text: 'two',
+        reply_to: '<reply-id>',
+      });
+    });
   });
 
   describe('checkInbox', () => {

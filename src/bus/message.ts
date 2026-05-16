@@ -1,4 +1,4 @@
-import { readdirSync, readFileSync, renameSync, statSync, existsSync } from 'fs';
+import { readdirSync, readFileSync, renameSync, statSync, existsSync, appendFileSync } from 'fs';
 import { join } from 'path';
 import { createHmac, timingSafeEqual } from 'crypto';
 import type { InboxMessage, Priority, BusPaths } from '../types/index.js';
@@ -44,6 +44,39 @@ function signPayload(msgId: string, from: string, to: string, text: string): str
 }
 
 /**
+ * Append a delivered message to the org-wide history log
+ * (`CTX_ROOT/logs/message-history.jsonl`).
+ *
+ * Why: the dashboard's /api/comms/feed + /api/comms/channels endpoints
+ * prefer this file when present (see dashboard/src/app/api/comms/
+ * feed/route.ts lines 74-89). Without it, every page load scans
+ * processed/{agent}/ dirs file-by-file — fine for tens of messages,
+ * slow at hundreds, painful at thousands.
+ *
+ * Failure mode: best-effort. The inbox file is the source of truth
+ * for delivery; the log is an indexing optimization. If the log write
+ * fails (disk full, perms, etc.) we warn but DO NOT throw — the
+ * recipient's message has already been written to their inbox above
+ * and would still be delivered. The dir-scan fallback in the dashboard
+ * still surfaces it.
+ *
+ * Backfill note: this only writes NEW messages from the point of
+ * deployment forward. The 649 historical messages already on disk
+ * remain visible to the dashboard via its dir-scan fallback path.
+ */
+function appendToHistoryLog(ctxRoot: string, message: InboxMessage): void {
+  const logDir = join(ctxRoot, 'logs');
+  const logPath = join(logDir, 'message-history.jsonl');
+  try {
+    ensureDir(logDir);
+    appendFileSync(logPath, JSON.stringify(message) + '\n');
+  } catch (err) {
+    const reason = err instanceof Error ? err.message : String(err);
+    console.warn(`[bus/message] warning: failed to append to message-history.jsonl: ${reason}`);
+  }
+}
+
+/**
  * Send a message to another agent's inbox.
  * Creates a JSON file with format: {pnum}-{epochMs}-from-{sender}-{rand5}.json
  * Identical to bash send-message.sh output.
@@ -83,6 +116,12 @@ export function sendMessage(
   const inboxDir = join(paths.ctxRoot, 'inbox', to);
   ensureDir(inboxDir);
   atomicWriteSync(join(inboxDir, filename), JSON.stringify(message));
+
+  // Index the delivered message in the org-wide history log so the
+  // dashboard's /api/comms/* endpoints can read it without scanning
+  // every processed/{agent}/ file on each page load. Best-effort —
+  // see appendToHistoryLog comment for failure semantics.
+  appendToHistoryLog(paths.ctxRoot, message);
 
   return msgId;
 }
