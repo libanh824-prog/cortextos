@@ -1719,7 +1719,22 @@ busCommand
   .description('List pending approval requests')
   .option('--format <fmt>', 'Output format: json|text', 'json')
   .option('--all-orgs', 'Scan all orgs under CTX_ROOT (matches dashboard view)', false)
-  .action((opts: { format?: string; allOrgs?: boolean }) => {
+  .option('--status <s>', 'Filter by status. Only "pending" is supported today (the underlying lister returns pending-only).', 'pending')
+  .action((opts: { format?: string; allOrgs?: boolean; status?: string }) => {
+    // --status guardrail. Historically the flag did not exist and any value
+    // produced an unknown-option error + exit 1, which silently broke crons
+    // that piped "list-approvals --status pending" expecting JSON. The flag is
+    // now additive: "pending" is a no-op (already the default behavior); any
+    // other value surfaces a clear error rather than silently returning empty.
+    const status = opts.status ?? 'pending';
+    if (status !== 'pending') {
+      console.error(
+        `error: --status "${status}" is not supported. Only "pending" is supported today; ` +
+          `list-approvals returns pending requests by default. Drop the flag or pass --status pending.`,
+      );
+      process.exit(1);
+    }
+
     const { listPendingApprovals } = require('../bus/approval.js');
     const { readdirSync, existsSync } = require('fs');
     const { join, homedir: _homedir } = require('path');
