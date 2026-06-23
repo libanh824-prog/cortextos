@@ -25,7 +25,7 @@ module.exports = {
     {
       name: 'cortextos-dashboard',
       script: 'npm',
-      args: 'run dev',
+      args: 'run start',
       cwd: "/home/liban/cortextos/dashboard",
       env: {
         PORT: process.env.PORT || '3000',
