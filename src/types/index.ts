@@ -795,4 +795,6 @@ export interface AgentStatus {
   sessionStart?: string;
   crashCount?: number;
   model?: string;
+  awaitingConfirmation?: boolean; // first-run observability fix: PTY parked on an
+  // interactive first-run prompt past the auto-accept backstop (wedged, not bootstrapped)
 }
