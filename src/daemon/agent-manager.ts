@@ -909,7 +909,7 @@ export class AgentManager {
   /**
    * Stop a specific agent.
    */
-  async stopAgent(name: string): Promise<void> {
+  async stopAgent(name: string, userInitiated = false): Promise<void> {
     const entry = this.agents.get(name);
     if (!entry) {
       console.log(`[agent-manager] Agent ${name} not found`);
@@ -927,6 +927,17 @@ export class AgentManager {
     if (scheduler) {
       scheduler.stop();
       this.cronSchedulers.delete(name);
+    }
+
+    // disable-resurrection fix: an explicit user stop/disable must win against a
+    // racing queued restart. Drop the pending entry instead of honoring it.
+    // Internal callers (restartAgent, stopAll) pass userInitiated=false, so the
+    // BUG-011/BUG-031 restart-all honor path below is preserved unchanged.
+    if (userInitiated) {
+      if (this.pendingRestarts.delete(name)) {
+        console.log(`[agent-manager] Dropped queued restart for ${name} — explicit user stop/disable wins.`);
+      }
+      return;
     }
 
     // BUG-031: honor any restart that was queued while we were stopping.
