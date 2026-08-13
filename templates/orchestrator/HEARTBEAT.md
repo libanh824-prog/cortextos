@@ -46,9 +46,9 @@ Human tasks reference: `.claude/skills/human-tasks/SKILL.md`
 cortextos bus read-all-heartbeats
 
 # Check all pending approvals
-cortextos bus list-approvals --format json 2>/dev/null
+cortextos bus list-approvals --format json
 
-# Check stale human tasks — list-tasks has NO --project flag; filter client-side.
+# Check stale human tasks — filter client-side (works on every deployed CLI; native --project exists only from #816 onward).
 # Do NOT suppress stderr here: an 'unknown option' error must be a HARD STOP, never read as "0 human tasks".
 cortextos bus list-tasks --status pending --format json | jq '[.[] | select(.project == "human-tasks" or (.title | startswith("[HUMAN]")))]'
 ```
