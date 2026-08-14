@@ -20,7 +20,7 @@ npm test
 ## Project Structure
 
 - `src/` — TypeScript source (bus, cli, daemon, hooks, types, utils)
-- `bus/` — Shell wrapper scripts (delegate to `dist/cli.js bus`)
+- `bus/` — Shell scripts: most delegate to `dist/cli.js bus`, but 12 are standalone implementations — notably all four `kb-*.sh` (which call `knowledge-base/scripts/mmrag.py` directly and accept flags, e.g. `--collection`, that the TS CLI does not)
 - `dashboard/` — Next.js 14 web dashboard
 - `templates/` — Agent templates (agent, orchestrator, analyst)
 - `community/` — Community skills and agent catalog
