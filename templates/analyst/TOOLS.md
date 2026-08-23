@@ -159,3 +159,26 @@ Agent secrets: `orgs/{org}/agents/{agent}/.env`
 - `gog gmail search "query" --max 10 -a you@gmail.com`
 - `gog calendar ls -a you@gmail.com --max 5`
 - Use `gog` instead of Gmail/Calendar MCP — more capable (send, archive, labels)
+
+---
+
+## ⚠️ Reading `message-history.jsonl` — never bare `jq`
+
+`$CTX_ROOT/logs/message-history.jsonl` can contain a **torn write**: an unclean stop mid-append (a reboot or crash) leaves NUL bytes where an appended record's data pages were lost, followed by an intact record. The known instance was a **kernel-upgrade reboot, 2026-07-09 06:41:27Z**, pinned from the bracketing timestamps and `last reboot` — not from a guess at which outage it was. **`jq` aborts the stream at that line and exits**, so it returns only the rows *before* the damage **as if they were the whole file** — no error unless you check `$?`, and nobody does in `jq … | sort | uniq -c`.
+
+Measured on the command org, 2026-08-23: `jq` returned **2442** rows of **6048**. It under-reports toward *"nothing there"*, which is the worst direction for an absence claim — it nearly produced a false "no such event" conclusion.
+
+**Use the shared tolerant reader**, which recovers NUL-prefixed rows and **announces anything it skips**:
+
+```bash
+# The reader is fleet-shared tooling maintained by the analyst agent:
+source "${CTX_FRAMEWORK_ROOT:?}/orgs/${CTX_ORG:?}/agents/analyst/scripts/lib/jsonl-read.sh"
+jsonl_read "$CTX_ROOT/logs/message-history.jsonl"      # rows on stdout, skip report on stderr
+JSONL_STRICT=1 jsonl_read "$file"                       # also exits 1 if anything was skipped
+```
+
+A tolerant reader that skips **silently** is the same defect one layer up, so this one always reports what it could not parse, with line numbers.
+
+**Never "repair" the log by deleting a line** — it is an append-only shared record and deleting rewrites history. Leave it, or append a marker so the corruption stays visible.
+
+**Sanity check for any jsonl:** `jq -c . f | wc -l` and `jsonl_read f | wc -l` should be EQUAL. If they differ, jq is truncating.
