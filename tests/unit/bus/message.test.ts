@@ -94,6 +94,29 @@ describe('Message Bus', () => {
       ).toThrow();
     });
 
+    it('history log line-integrity: every append is one complete parseable line, incl. >4KB records (task_1787489896030)', () => {
+      // The Jul 9 2026 tear left NUL bytes + a merged line that truncated
+      // every jq reader at 40% of the file. Contract under test: N sends
+      // produce exactly N lines, each independently parseable — the
+      // jq-equivalence property the fix must preserve. Includes a record
+      // well past 4096 bytes (the size class the split-write hypothesis
+      // worried about; ruled out forensically, pinned here anyway).
+      const big = 'x'.repeat(6000);
+      for (let i = 0; i < 5; i++) {
+        sendMessage(senderPaths, 'sender', 'receiver', 'normal', i === 2 ? big : `msg-${i}`);
+      }
+      const logPath = join(testDir, 'logs', 'message-history.jsonl');
+      const raw = readFileSync(logPath, 'utf-8');
+      expect(raw.includes('\u0000')).toBe(false);
+      const lines = raw.trim().split('\n');
+      expect(lines).toHaveLength(5);
+      lines.forEach((l, i) => {
+        const rec = JSON.parse(l); // throws = fail
+        expect(rec.from).toBe('sender');
+        if (i === 2) expect(rec.text.length).toBe(6000);
+      });
+    });
+
     it('appends each delivered message as a JSONL line to logs/message-history.jsonl', () => {
       // Backs task C1 — the dashboard /api/comms/* endpoints read
       // message-history.jsonl as their primary source. Without this

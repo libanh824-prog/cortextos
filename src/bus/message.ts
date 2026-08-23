@@ -1,4 +1,4 @@
-import { readdirSync, readFileSync, renameSync, statSync, existsSync, appendFileSync } from 'fs';
+import { readdirSync, readFileSync, renameSync, statSync, existsSync, openSync, writeSync, fsyncSync, closeSync } from 'fs';
 import { join } from 'path';
 import { createHmac, timingSafeEqual } from 'crypto';
 import type { InboxMessage, Priority, BusPaths } from '../types/index.js';
@@ -69,7 +69,33 @@ function appendToHistoryLog(ctxRoot: string, message: InboxMessage): void {
   const logPath = join(logDir, 'message-history.jsonl');
   try {
     ensureDir(logDir);
-    appendFileSync(logPath, JSON.stringify(message) + '\n');
+    // Crash-safe append (task_1787489896030). The old appendFileSync left the
+    // record in the page cache with no fsync. Forensic (2026-08-23): the tear
+    // at line 2443 is 1028 NUL bytes followed by a WHOLE intact record —
+    // one lost record's worth of zeros, not a split-write tail — and the
+    // surrounding timestamps bracket the Jul 9 2026 06:41:27Z reboot (kernel
+    // upgrade) exactly: a record appended ~06:40Z had its size update survive
+    // the stop while its data pages never flushed; the next append (06:42:12Z,
+    // post-boot) landed after the phantom zeros. Every plain jq reader then
+    // silently truncated the stream at that line (2442 of 6048 rows).
+    //
+    // Fix: single write() of the complete line on an O_APPEND fd, then
+    // fsync before returning — data reaches the platter (or journal) before
+    // we report success, so a post-return crash cannot zero-fill it. A crash
+    // in the microseconds between write and fsync remains theoretically
+    // possible (perfect append atomicity needs a per-record journal, which
+    // this best-effort index does not warrant); the NUL-tolerant reader
+    // (analyst's scripts/lib/jsonl-read.sh) remains the belt to this brace.
+    // atomicWriteSync (temp+rename) is deliberately NOT used: rename-replace
+    // on a shared append-only log would race concurrent appenders and drop
+    // records.
+    const fd = openSync(logPath, 'a');
+    try {
+      writeSync(fd, JSON.stringify(message) + '\n');
+      fsyncSync(fd);
+    } finally {
+      closeSync(fd);
+    }
   } catch (err) {
     const reason = err instanceof Error ? err.message : String(err);
     console.warn(`[bus/message] warning: failed to append to message-history.jsonl: ${reason}`);
