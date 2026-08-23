@@ -752,12 +752,14 @@ busCommand
   .argument('<value>', 'Measured value')
   .option('--score <n>', 'Score 1-10')
   .option('--justification <text>', 'Justification text')
-  .action((id: string, value: string, opts: { score?: string; justification?: string }) => {
+  .option('--commit <sha>', 'Git sha of the change this intervention landed as (makes the decision verifiable)')
+  .action((id: string, value: string, opts: { score?: string; justification?: string; commit?: string }) => {
     const env = resolveEnv();
     const agentDir = env.agentDir || process.cwd();
     const experiment = evaluateExperiment(agentDir, id, parseFloat(value), {
       score: opts.score ? parseInt(opts.score, 10) : undefined,
       justification: opts.justification,
+      commit: opts.commit,
     });
     console.log(JSON.stringify(experiment, null, 2));
   });

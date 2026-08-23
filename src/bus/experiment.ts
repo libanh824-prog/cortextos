@@ -9,6 +9,10 @@ export interface Experiment {
   id: string;
   agent: string;
   metric: string;
+  /** What this entry IS: an intervention tested against a metric, or a
+   *  periodic cycle log. Optional because entries predating 2026-08-23 lack
+   *  it — those are classified at read time by classifyEntryKind(). */
+  entry_kind?: 'intervention' | 'cycle_log';
   hypothesis: string;
   surface: string;
   direction: 'higher' | 'lower';
@@ -33,11 +37,16 @@ export interface ExperimentCreateOptions {
   window?: string;
   measurement?: string;
   approval_required?: boolean;
+  entry_kind?: 'intervention' | 'cycle_log';
 }
 
 export interface ExperimentEvaluateOptions {
   learning?: string;
   score?: number;
+  /** The sha of the change this intervention landed as. Caller-named ONLY —
+   *  never inferred from any repo's HEAD (a wrong sha reads as verified;
+   *  null is legible as missing). Legacy rows stay null = UNKNOWN. */
+  commit?: string;
   justification?: string;
 }
 
@@ -54,9 +63,20 @@ export interface GatherContextOptions {
 export interface ExperimentContext {
   agent: string;
   total_experiments: number;
+  /** keeps/discards/keep_rate are computed over COMPLETED INTERVENTIONS only
+   *  (cycle logs and retired-metric entries excluded) — see keep_rate_basis. */
   keeps: number;
   discards: number;
   keep_rate: number;
+  /** The rate's own evidence: what population it was computed over and how
+   *  each member was classified. A bare rate is a verdict without evidence. */
+  keep_rate_basis: {
+    population: string;
+    n: number;
+    classified_by_entry_kind: number;
+    classified_by_legacy_metric_rule: number;
+    excluded_cycle_logs: number;
+  };
   learnings: string;
   results_tsv: string;
   identity: string;
@@ -160,11 +180,18 @@ export function createExperiment(
   const id = `exp_${epoch}_${rand}`;
 
   const cycleDefaults = findCycleDefaults(agentDir, agentName, metric);
+  // entry_kind at CREATE: explicit option wins; else a metric matching a
+  // registered cycle for this agent is a cycle log, anything else is an
+  // intervention. Property set at write time so reads never need the
+  // legacy denylist for new entries.
+  const entryKind: 'intervention' | 'cycle_log' =
+    options?.entry_kind ?? (cycleDefaults.matched ? 'cycle_log' : 'intervention');
 
   const experiment: Experiment = {
     id,
     agent: agentName,
     metric,
+    entry_kind: entryKind,
     hypothesis,
     surface: options?.surface ?? cycleDefaults.surface ?? '',
     direction: options?.direction ?? cycleDefaults.direction ?? 'higher',
@@ -199,7 +226,7 @@ function findCycleDefaults(
   agentDir: string,
   agentName: string,
   metric: string,
-): Partial<Pick<ExperimentCreateOptions, 'surface' | 'direction' | 'window' | 'measurement'>> {
+): Partial<Pick<ExperimentCreateOptions, 'surface' | 'direction' | 'window' | 'measurement'>> & { matched?: boolean } {
   try {
     const config = loadConfig(agentDir);
     const cycle = config.cycles?.find(
@@ -207,6 +234,7 @@ function findCycleDefaults(
     );
     if (!cycle) return {};
     return {
+      matched: true,
       surface: cycle.surface || undefined,
       direction: cycle.direction || undefined,
       window: cycle.window || undefined,
@@ -260,6 +288,23 @@ export function evaluateExperiment(
 
   if (experiment.status !== 'running') {
     throw new Error(`Experiment ${experimentId} is '${experiment.status}', expected 'running'`);
+  }
+
+  // experiment_commit: the landed-change link that makes the decision
+  // VERIFIABLE rather than merely claimed. Caller-named sha only.
+  if (options?.commit) {
+    if (!/^[0-9a-f]{7,40}$/i.test(options.commit)) {
+      throw new Error(`--commit '${options.commit}' does not look like a git sha (7-40 hex chars)`);
+    }
+    experiment.experiment_commit = options.commit;
+  } else if (classifyEntryKind(experiment) === 'intervention' && !experiment.experiment_commit) {
+    // Visible, not fatal: an intervention completed without a commit link is
+    // a decision the register can never verify LANDED. Say so at the moment
+    // it happens rather than discovering 49 nulls in an audit.
+    console.error(
+      `evaluate-experiment: ${experimentId} completed WITHOUT --commit — ` +
+      'decision recorded without a landed-change link; the round-trip is unverifiable from the register.'
+    );
   }
 
   // Compare measured vs baseline using direction
@@ -360,6 +405,29 @@ export function evaluateExperiment(
 /**
  * List experiments with optional filters.
  */
+/**
+ * Metrics RETIRED from intervention accounting. system_effectiveness was the
+ * 1-10 compound score retired at TW#61 (2026-08-19) for emitting 9 on 87% of
+ * cycles; its 47 unanimous "keeps" were cycle logs, not tested interventions.
+ *
+ * HONEST LIMIT: this is a DENYLIST and only classifies LEGACY entries (those
+ * without entry_kind, all predating 2026-08-23). A legacy-era cycle log under
+ * a metric name not listed here slips through as an intervention. Entries
+ * created after entry_kind existed carry the property and never touch this
+ * list. Do not extend this list as a substitute for setting entry_kind.
+ */
+export const RETIRED_METRICS = ['system_effectiveness'];
+
+/**
+ * Classify an entry from its PROPERTY when present; the metric-name denylist
+ * is strictly the legacy fallback (fix-the-source-not-the-proxy: the field is
+ * authoritative, the name rule exists only because old rows carry no field).
+ */
+export function classifyEntryKind(e: Experiment): 'intervention' | 'cycle_log' {
+  if (e.entry_kind) return e.entry_kind;
+  return RETIRED_METRICS.includes(e.metric) ? 'cycle_log' : 'intervention';
+}
+
 export function listExperiments(
   agentDir: string,
   filters?: ExperimentFilters,
@@ -419,10 +487,22 @@ export function gatherContext(
   // Calculate stats from history
   const all = listExperiments(agentDir);
   const completed = all.filter(e => e.status === 'completed');
-  const keeps = completed.filter(e => e.decision === 'keep').length;
-  const discards = completed.filter(e => e.decision === 'discard').length;
+  // Rate over COMPLETED INTERVENTIONS only. Cycle logs (47/49 of analyst's
+  // register as of 2026-08-23, unanimous keeps by construction) made the
+  // headline 0.98 while the tested-intervention truth was 0.50 — a
+  // population that has never dissented is not evidence about interventions.
+  const completedInterventions = completed.filter(e => classifyEntryKind(e) === 'intervention');
+  const keeps = completedInterventions.filter(e => e.decision === 'keep').length;
+  const discards = completedInterventions.filter(e => e.decision === 'discard').length;
   const total = all.length;
-  const keepRate = completed.length > 0 ? keeps / completed.length : 0;
+  const keepRate = completedInterventions.length > 0 ? keeps / completedInterventions.length : 0;
+  const keepRateBasis = {
+    population: 'completed interventions (cycle logs + retired-metric legacy entries excluded)',
+    n: completedInterventions.length,
+    classified_by_entry_kind: completedInterventions.filter(e => e.entry_kind).length,
+    classified_by_legacy_metric_rule: completedInterventions.filter(e => !e.entry_kind).length,
+    excluded_cycle_logs: completed.length - completedInterventions.length,
+  };
 
   // Read agent IDENTITY.md and GOALS.md
   const identityPath = join(agentDir, 'IDENTITY.md');
@@ -437,6 +517,7 @@ export function gatherContext(
     keeps,
     discards,
     keep_rate: keepRate,
+    keep_rate_basis: keepRateBasis,
     learnings,
     results_tsv: resultsTsv,
     identity,
