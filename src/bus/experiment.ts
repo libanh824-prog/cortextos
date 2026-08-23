@@ -180,12 +180,25 @@ export function createExperiment(
   const id = `exp_${epoch}_${rand}`;
 
   const cycleDefaults = findCycleDefaults(agentDir, agentName, metric);
-  // entry_kind at CREATE: explicit option wins; else a metric matching a
-  // registered cycle for this agent is a cycle log, anything else is an
-  // intervention. Property set at write time so reads never need the
-  // legacy denylist for new entries.
+  // entry_kind at CREATE: explicit option wins; else a CYCLE METRIC is a
+  // cycle log, anything else is an intervention. Property set at write time
+  // so reads never need the legacy denylist for new entries.
+  //
+  // "Cycle metric" must be decided from EVERY place cycle metrics live, not
+  // just cycles[] (analyst regression 2026-08-23: cycles was EMPTY and the
+  // theta-wave metric lives at config.theta_wave.metric, so new
+  // system_effectiveness entries were stamped 'intervention' and the
+  // property — correctly beating the legacy rule — carried the wrong value
+  // into the rate forever). Fix at the SOURCE: cycles[] match OR the
+  // configured theta_wave.metric OR a RETIRED metric (retired BECAUSE they
+  // were cycle scores; a new entry under one is a cycle log by definition).
+  const twMetric = (() => {
+    try { return loadConfig(agentDir).theta_wave?.metric; } catch { return undefined; }
+  })();
+  const isCycleMetric =
+    Boolean(cycleDefaults.matched) || metric === twMetric || RETIRED_METRICS.includes(metric);
   const entryKind: 'intervention' | 'cycle_log' =
-    options?.entry_kind ?? (cycleDefaults.matched ? 'cycle_log' : 'intervention');
+    options?.entry_kind ?? (isCycleMetric ? 'cycle_log' : 'intervention');
 
   const experiment: Experiment = {
     id,

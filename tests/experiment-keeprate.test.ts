@@ -123,3 +123,29 @@ describe('retired list is legacy-only documentation', () => {
     expect(RETIRED_METRICS).toContain('system_effectiveness');
   });
 });
+
+describe('entry_kind at create — analyst regression fixtures (2026-08-23)', () => {
+  it('theta_wave.metric with EMPTY cycles[] stamps cycle_log (the real analyst shape)', () => {
+    mkdirSync(join(testDir, 'experiments'), { recursive: true });
+    writeFileSync(join(testDir, 'experiments', 'config.json'), JSON.stringify({
+      approval_required: false, cycles: [],
+      theta_wave: { enabled: true, interval: '24h', metric: 'system_effectiveness' },
+    }));
+    const id = createExperiment(testDir, 'analyst', 'system_effectiveness', 'cycle assessment');
+    const e = JSON.parse(readFileSync(join(histDir, `${id}.json`), 'utf-8'));
+    expect(e.entry_kind).toBe('cycle_log');
+    expect(classifyEntryKind(e)).toBe('cycle_log');
+  });
+
+  it('a RETIRED metric stamps cycle_log even with no config at all', () => {
+    const id = createExperiment(testDir, 'anyagent', 'system_effectiveness', 'h');
+    const e = JSON.parse(readFileSync(join(histDir, `${id}.json`), 'utf-8'));
+    expect(e.entry_kind).toBe('cycle_log');
+  });
+
+  it('explicit entry_kind option still overrides the cycle-metric derivation', () => {
+    const id = createExperiment(testDir, 'anyagent', 'system_effectiveness', 'h', { entry_kind: 'intervention' });
+    const e = JSON.parse(readFileSync(join(histDir, `${id}.json`), 'utf-8'));
+    expect(e.entry_kind).toBe('intervention');
+  });
+});
