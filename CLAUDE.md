@@ -13,7 +13,10 @@ npm test
 ## Before Submitting Changes
 
 1. `npm run build` — TypeScript must compile cleanly
-2. `npm test` — all tests must pass
+2. `npm test` — all tests must pass. This project uses **vitest**: run a single
+   file with `npm test -- <file>`, never `npx jest` — the bare `npx jest`
+   invocation fails in babel AND silently downloads a ~120MB jest toolchain
+   into `~/.npm/_npx` (two agents hit this the same night, 2026-08-23)
 3. Match existing patterns in `src/` for new features
 4. Add unit tests in `tests/` for any new code
 
