@@ -22,7 +22,7 @@
  * State: {ctxRoot}/state/{agentName}/loop-detector.json
  */
 
-import { existsSync, readFileSync, writeFileSync, mkdirSync } from 'fs';
+import { existsSync, readFileSync, writeFileSync, mkdirSync, appendFileSync } from 'fs';
 import { join } from 'path';
 import { homedir } from 'os';
 import { createHash } from 'crypto';
@@ -51,6 +51,14 @@ export interface LoopDetectorState {
   history: ToolCallRecord[];
   firstBlockedAt?: number | null;
   emergencyEscapeUsed?: boolean;
+  // LIFETIME observability fields (task_1787560184017): monotonic, NEVER
+  // reset. firstBlockedAt intentionally keeps its existing reset-on-allow
+  // semantics (load-bearing for the escape window); these carry the durable
+  // "has this hook ever fired" record that firstBlockedAt structurally
+  // cannot. total_blocks/last_blocked_at survive every allow.
+  totalBlocks?: number;
+  totalEscapes?: number;
+  lastBlockedAt?: number | null;
 }
 
 function sortObjectKeys(value: unknown): unknown {
@@ -97,7 +105,14 @@ export function loadState(stateDir: string): LoopDetectorState {
       typeof parsed.firstBlockedAt === 'number' ? parsed.firstBlockedAt : null;
     const emergencyEscapeUsed =
       typeof parsed.emergencyEscapeUsed === 'boolean' ? parsed.emergencyEscapeUsed : false;
-    return { history, firstBlockedAt, emergencyEscapeUsed };
+    return {
+      history,
+      firstBlockedAt,
+      emergencyEscapeUsed,
+      totalBlocks: typeof parsed.totalBlocks === 'number' ? parsed.totalBlocks : 0,
+      totalEscapes: typeof parsed.totalEscapes === 'number' ? parsed.totalEscapes : 0,
+      lastBlockedAt: typeof parsed.lastBlockedAt === 'number' ? parsed.lastBlockedAt : null,
+    };
   } catch {
     return { history: [], firstBlockedAt: null, emergencyEscapeUsed: false };
   }
@@ -155,6 +170,45 @@ export function detectPingPong(history: ToolCallRecord[]): {
   };
 }
 
+/**
+ * Durable record of a block/escape (task_1787560184017): before this, a
+ * block wrote only the hook-protocol response to stdout and the state file
+ * erased its own evidence on the next allow — the hook was UNOBSERVABLE in
+ * production (a blocking hook was indistinguishable from a flaky tool).
+ * Writes the same JSONL shape as bus log-event, directly (no logEvent import:
+ * that would also refresh the agent heartbeat as a side-effect, and a hook
+ * must stay side-effect-minimal). Never throws — observability must never
+ * break the tool call itself.
+ */
+export function emitLoopEvent(
+  ctxRoot: string,
+  agentName: string,
+  org: string,
+  eventName: 'loop_block' | 'loop_escape',
+  metadata: Record<string, unknown>,
+): void {
+  try {
+    const base = org ? join(ctxRoot, 'orgs', org) : ctxRoot;
+    const eventsDir = join(base, 'analytics', 'events', agentName);
+    mkdirSync(eventsDir, { recursive: true });
+    const epoch = Math.floor(Date.now() / 1000);
+    const today = new Date().toISOString().split('T')[0];
+    const line = JSON.stringify({
+      id: `${epoch}-${agentName}-hook`,
+      agent: agentName,
+      org,
+      timestamp: new Date().toISOString().replace(/\.\d{3}Z$/, 'Z'),
+      category: 'hook',
+      event: eventName,
+      severity: eventName === 'loop_block' ? 'warning' : 'info',
+      metadata,
+    });
+    appendFileSync(join(eventsDir, `${today}.jsonl`), line + '\n', 'utf-8');
+  } catch {
+    // best-effort — never fail the hook over its own audit trail
+  }
+}
+
 function blockCall(reason: string): void {
   process.stdout.write(JSON.stringify({ decision: 'block', reason }) + '\n');
   process.exit(0);
@@ -203,6 +257,12 @@ export function decideHookAction(
         ? `Tool loop detected: "${pp.tools[0]}" and "${pp.tools[1]}" are alternating repeatedly (${pp.count} alternations in the last ${hypothetical.length} calls). Stop this back-and-forth pattern and try a fundamentally different approach.`
         : null;
 
+  const lifetime = {
+    totalBlocks: state.totalBlocks ?? 0,
+    totalEscapes: state.totalEscapes ?? 0,
+    lastBlockedAt: state.lastBlockedAt ?? null,
+  };
+
   if (wouldBlockReason === null) {
     return {
       action: 'allow',
@@ -210,6 +270,8 @@ export function decideHookAction(
         history: hypothetical,
         firstBlockedAt: null,
         emergencyEscapeUsed: false,
+        // lifetime fields survive the reset — that is their whole point
+        ...lifetime,
       },
     };
   }
@@ -228,6 +290,8 @@ export function decideHookAction(
         history: recentHistory,
         firstBlockedAt,
         emergencyEscapeUsed: true,
+        ...lifetime,
+        totalEscapes: lifetime.totalEscapes + 1,
       },
       alertMessage: `[hook-loop-detector] Emergency escape granted after ${minutesBlocked} min blocked. One tool call allowed; subsequent calls will block again until the workflow itself changes.`,
     };
@@ -239,6 +303,9 @@ export function decideHookAction(
       history: recentHistory,
       firstBlockedAt,
       emergencyEscapeUsed,
+      ...lifetime,
+      totalBlocks: lifetime.totalBlocks + 1,
+      lastBlockedAt: now,
     },
     reason: wouldBlockReason,
   };
@@ -258,12 +325,22 @@ async function main(): Promise<void> {
 
   saveState(stateDir, decision.nextState);
 
+  const org = process.env.CTX_ORG || '';
   if (decision.action === 'block' && decision.reason) {
+    emitLoopEvent(ctxRoot, agentName, org, 'loop_block', {
+      tool: tool_name,
+      reason: decision.reason.slice(0, 200),
+      total_blocks: decision.nextState.totalBlocks ?? null,
+    });
     blockCall(decision.reason);
     return;
   }
 
   if (decision.action === 'escape' && decision.alertMessage) {
+    emitLoopEvent(ctxRoot, agentName, org, 'loop_escape', {
+      tool: tool_name,
+      total_escapes: decision.nextState.totalEscapes ?? null,
+    });
     process.stderr.write(decision.alertMessage + '\n');
   }
 

@@ -310,3 +310,69 @@ describe('hook-loop-detector state loading', () => {
     expect(state.history.map(r => r.toolName)).toEqual(['Read', 'Bash']);
   });
 });
+
+// ── Lifetime observability (task_1787560184017) ─────────────────────────────
+// A block used to leave NO durable record: stdout response only, and
+// firstBlockedAt erased itself on the next allow. These pin the fix.
+import { emitLoopEvent } from '../../../src/hooks/hook-loop-detector';
+import { readFileSync as rf, readdirSync } from 'fs';
+import { join as j } from 'path';
+
+describe('lifetime counters — monotonic, never reset', () => {
+  const now = 1_700_000_000_000;
+  function blockedState() {
+    // real block shape: same tool+args repeated past the threshold
+    let st: LoopDetectorState = { history: [], firstBlockedAt: null, emergencyEscapeUsed: false };
+    let last: HookDecision | null = null;
+    for (let i = 0; i < REPETITION_BLOCK + 2; i++) {
+      last = decideHookAction(st, 'Bash', 'samehash', now + i * 1000);
+      st = last.nextState;
+    }
+    return { st, last: last! };
+  }
+
+  it('block INCREMENTS totalBlocks (0 -> positive) and stamps lastBlockedAt', () => {
+    const { st, last } = blockedState();
+    expect(last.action).toBe('block');
+    expect(st.totalBlocks ?? 0).toBeGreaterThan(0);   // positive artefact, not survival of zero
+    expect(st.lastBlockedAt).not.toBeNull();
+  });
+
+  it('the counters SURVIVE the allow that resets firstBlockedAt', () => {
+    const { st } = blockedState();
+    const blocks = st.totalBlocks!;
+    const lastAt = st.lastBlockedAt!;
+    const allowed = decideHookAction(st, 'Read', 'differenthash', now + 100_000);
+    expect(allowed.action).toBe('allow');
+    expect(allowed.nextState.firstBlockedAt).toBeNull();        // old semantics intact
+    expect(allowed.nextState.totalBlocks).toBe(blocks);          // lifetime survives
+    expect(allowed.nextState.lastBlockedAt).toBe(lastAt);
+  });
+
+  it('loadState round-trips the lifetime fields', () => {
+    const dir = mkdtempSync(j(tmpdir(), 'loopdet-'));
+    try {
+      writeFileSync(j(dir, 'loop-detector.json'), JSON.stringify({ history: [], firstBlockedAt: null, emergencyEscapeUsed: false, totalBlocks: 7, totalEscapes: 2, lastBlockedAt: 123 }));
+      const back = loadState(dir);
+      expect(back.totalBlocks).toBe(7);
+      expect(back.totalEscapes).toBe(2);
+      expect(back.lastBlockedAt).toBe(123);
+    } finally { rmSync(dir, { recursive: true, force: true }); }
+  });
+});
+
+describe('durable block event — round-tripped, not just called', () => {
+  it('emitLoopEvent writes a parseable event row identifying agent + block', () => {
+    const root = mkdtempSync(j(tmpdir(), 'loopevt-'));
+    try {
+      emitLoopEvent(root, 'testagent', 'testorg', 'loop_block', { tool: 'Bash', total_blocks: 1 });
+      const dir = j(root, 'orgs', 'testorg', 'analytics', 'events', 'testagent');
+      const files = readdirSync(dir);
+      expect(files).toHaveLength(1);
+      const rows = rf(j(dir, files[0]), 'utf-8').trim().split('\n').map((l) => JSON.parse(l));
+      expect(rows).toHaveLength(1);
+      expect(rows[0]).toMatchObject({ agent: 'testagent', org: 'testorg', category: 'hook', event: 'loop_block', severity: 'warning' });
+      expect(rows[0].metadata.total_blocks).toBe(1);
+    } finally { rmSync(root, { recursive: true, force: true }); }
+  });
+});
