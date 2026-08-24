@@ -36,6 +36,8 @@ export interface CatalogBrowseResult {
 }
 
 export interface CatalogBrowseOptions {
+  /** Agent workspace dir — where per-agent skills live (.claude/skills). */
+  agentDir?: string;
   type?: string;
   tag?: string;
   search?: string;
@@ -143,6 +145,30 @@ function writeInstalled(ctxRoot: string, data: Record<string, unknown>): void {
 
 // --- browseCatalog ---
 
+/**
+ * Where an item of this type lives on disk. SINGLE SOURCE OF TRUTH shared by
+ * installCommunityItem and the browse presence check (task_1787598144541):
+ * presence and install can never disagree about the location again.
+ * Returns null for unknown types.
+ */
+export function itemTargetDir(
+  frameworkRoot: string,
+  agentDir: string | undefined,
+  itemType: string,
+  itemName: string,
+): string | null {
+  switch (itemType) {
+    case 'skill':
+      return join(agentDir || frameworkRoot, '.claude', 'skills', itemName);
+    case 'agent':
+      return join(frameworkRoot, 'templates', 'personas', itemName);
+    case 'org':
+      return join(frameworkRoot, 'templates', 'orgs', itemName);
+    default:
+      return null;
+  }
+}
+
 export function browseCatalog(
   frameworkRoot: string,
   ctxRoot: string,
@@ -186,12 +212,24 @@ export function browseCatalog(
     );
   }
 
-  // Enrich with installed status
-  const installed = readInstalled(ctxRoot);
-  items = items.map(i => ({
-    ...i,
-    installed: installed[i.name] != null,
-  }));
+  // Enrich with installed status — PRESENCE, computed from disk.
+  // The old check read .installed-community.json, a ledger of items
+  // installed VIA install-community-item — a narrower question than the
+  // "whether already installed" the skill doc promises. Template-shipped
+  // skills (tasks, comms, theta-wave, ...) were never community-installed,
+  // so ~22 skills the fleet already runs reported installed=false and got
+  // re-recommended (analyst, 2026-08-24). installed now means IS ON DISK at
+  // the exact path install would use; via_catalog carries the ledger
+  // provenance separately.
+  const ledger = readInstalled(ctxRoot);
+  items = items.map(i => {
+    const target = itemTargetDir(frameworkRoot, options.agentDir, i.type, i.name);
+    return {
+      ...i,
+      installed: target != null && existsSync(target),
+      via_catalog: ledger[i.name] != null,
+    };
+  });
 
   return { status: 'ok', count: items.length, items };
 }
@@ -254,23 +292,11 @@ export function installCommunityItem(
   }
 
   // Determine target based on type
-  let targetDir: string;
-  switch (item.type) {
-    case 'skill':
-      // Skills must land under .claude/skills/ because that is where the
-      // Claude Code harness actually discovers them. Writing to a bare
-      // skills/ directory meant installs silently didn't load without a
-      // manual cp into .claude/skills/ after the fact.
-      targetDir = join(options.agentDir || frameworkRoot, '.claude', 'skills', itemName);
-      break;
-    case 'agent':
-      targetDir = join(frameworkRoot, 'templates', 'personas', itemName);
-      break;
-    case 'org':
-      targetDir = join(frameworkRoot, 'templates', 'orgs', itemName);
-      break;
-    default:
-      return { status: 'error', name: itemName, error: `unknown item type: ${item.type}` };
+  // Skills land under .claude/skills/ because that is where the Claude Code
+  // harness actually discovers them (a bare skills/ dir silently never loads).
+  const targetDir = itemTargetDir(frameworkRoot, options.agentDir, item.type, itemName);
+  if (targetDir == null) {
+    return { status: 'error', name: itemName, error: `unknown item type: ${item.type}` };
   }
 
   // Check for existing installation

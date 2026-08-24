@@ -852,6 +852,8 @@ busCommand
       type: opts.type,
       tag: opts.tag,
       search: opts.search,
+      // Presence is per-agent for skills: check THIS agent's .claude/skills.
+      agentDir: env.agentDir || process.cwd(),
     });
     console.log(JSON.stringify(result, null, 2));
   });
