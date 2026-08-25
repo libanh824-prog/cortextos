@@ -91,6 +91,28 @@ describe('updateCronFire', () => {
     cleanup();
   });
 
+  it('a flag-less mark PRESERVES a previously declared interval (analyst finding 2026-08-25: whole-record replace silently un-declared cadence, blinding S5 + the daemon gap-nudge)', () => {
+    updateCronFire(tmpDir, 'theta-wave', '24h');
+    updateCronFire(tmpDir, 'theta-wave'); // mark only — no --interval
+    const rec = readCronState(tmpDir).crons.find(r => r.name === 'theta-wave')!;
+    expect(rec.interval).toBe('24h');
+    cleanup();
+  });
+
+  it('an explicit new interval still overrides the declared one', () => {
+    updateCronFire(tmpDir, 'theta-wave', '24h');
+    updateCronFire(tmpDir, 'theta-wave', '12h');
+    expect(readCronState(tmpDir).crons.find(r => r.name === 'theta-wave')!.interval).toBe('12h');
+    cleanup();
+  });
+
+  it('a flag-less mark on a never-declared cron stays undeclared (no invented cadence)', () => {
+    updateCronFire(tmpDir, 'bare-cron');
+    updateCronFire(tmpDir, 'bare-cron');
+    expect(readCronState(tmpDir).crons.find(r => r.name === 'bare-cron')!.interval).toBeUndefined();
+    cleanup();
+  });
+
   it('works without interval argument', () => {
     updateCronFire(tmpDir, 'heartbeat');
     const state = readCronState(tmpDir);

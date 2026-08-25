@@ -15,9 +15,9 @@
  * Storage: state/<agent>/cron-state.json (same dir as pending-reminders.json).
  */
 
-import { existsSync, readFileSync, writeFileSync } from 'fs';
+import { existsSync, readFileSync } from 'fs';
 import { join } from 'path';
-import { ensureDir } from '../utils/atomic.js';
+import { atomicWriteSync, ensureDir } from '../utils/atomic.js';
 
 export interface CronFireRecord {
   name: string;
@@ -69,11 +69,19 @@ export function updateCronFire(
   if (idx === -1) {
     state.crons.push(record);
   } else {
-    state.crons[idx] = record;
+    // MERGE, never replace: a mark without --interval must not erase a
+    // previously declared cadence. The interval declaration is load-bearing
+    // for gap detection (daemon gap-nudge + the OOB watcher's S5); under the
+    // old whole-record replace, one flag-less fire silently un-declared it
+    // and both monitors went blind on that cron with nothing logged.
+    state.crons[idx] = { ...state.crons[idx], ...record };
   }
 
   state.updated_at = now;
-  writeFileSync(cronStatePath(stateDir), JSON.stringify(state, null, 2) + '\n', 'utf-8');
+  // Atomic: this file is the agent-side liveness witness that frozen-session
+  // detection trusts — a torn write here fabricates exactly the corruption
+  // that detection exists to catch.
+  atomicWriteSync(cronStatePath(stateDir), JSON.stringify(state, null, 2) + '\n');
 }
 
 /**
