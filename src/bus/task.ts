@@ -256,6 +256,86 @@ export function findTaskFile(paths: BusPaths, taskId: string): string | null {
 }
 
 /**
+ * Read-only single-task lookup by exact id. Same two-tier resolution as
+ * findTaskFile (own-org fast path, then cross-org scan) but never writes:
+ * checking an id must not touch updated_at, which is exactly the foot-gun
+ * of reaching for update-task to "check" whether a task exists.
+ *
+ * Returns null only when NO file exists for the id. A file that exists but
+ * cannot be parsed throws, naming the path — a corrupt record must never
+ * read as "missing" (false-MISSING is how operators get sent hunting for a
+ * task that is sitting right there with a mangled byte in it).
+ */
+export function getTask(paths: BusPaths, taskId: string): Task | null {
+  const filePath = findTaskFile(paths, taskId);
+  if (!filePath) return null;
+  try {
+    return JSON.parse(readFileSync(filePath, 'utf-8')) as Task;
+  } catch (err) {
+    throw new Error(
+      `Task file ${filePath} exists but could not be parsed (${err instanceof Error ? err.message : err}). ` +
+      `This is a corrupt record, NOT a missing task.`,
+    );
+  }
+}
+
+/**
+ * Full task ids that START WITH the given fragment, across all orgs.
+ * Rendered task tables truncate long ids, so an operator can end up holding
+ * a PREFIX of a real id; an exact-match miss on such a fragment must be
+ * reported as "incomplete", not "does not exist". Filename scan only — no
+ * task file is opened, nothing is written.
+ */
+export function findTaskIdsByPrefix(paths: BusPaths, fragment: string, limit = 10): string[] {
+  const out: string[] = [];
+  if (!fragment) return out;
+  const orgsRoot = join(paths.ctxRoot, 'orgs');
+  try {
+    for (const entry of readdirSync(orgsRoot, { withFileTypes: true })) {
+      if (!entry.isDirectory()) continue;
+      let files: string[];
+      try {
+        files = readdirSync(join(orgsRoot, entry.name, 'tasks'));
+      } catch {
+        continue; // org without a tasks dir
+      }
+      for (const f of files) {
+        if (f.endsWith('.json') && f.startsWith(fragment) && f !== `${fragment}.json`) {
+          out.push(f.slice(0, -'.json'.length));
+          if (out.length >= limit) return out;
+        }
+      }
+    }
+  } catch {
+    // orgs/ missing or unreadable — nothing to suggest
+  }
+  return out;
+}
+
+/**
+ * One miss message for every failed task-id lookup, distinguishing "the id
+ * you have is a truncated prefix of a real id" from "no such task exists".
+ * The write-path resolvers (update/claim/complete) previously answered both
+ * cases with "not found in any org", which reads as does-not-exist and sends
+ * operators hunting for a deleted task when they are actually holding a
+ * cut-off id copied from a rendered table.
+ */
+export function taskMissMessage(paths: BusPaths, taskId: string): string {
+  const prefixHits = findTaskIdsByPrefix(paths, taskId);
+  if (prefixHits.length > 0) {
+    return (
+      `Task ${taskId} not found as an EXACT id, but it is a prefix of ${prefixHits.length} full id(s): ` +
+      `${prefixHits.join(', ')}. The id you have is likely TRUNCATED — rendered task tables cut long ids ` +
+      `(and can run them into the next column); use list-tasks --format json for full ids, then re-run.`
+    );
+  }
+  return (
+    `Task ${taskId} not found in any org under ${paths.ctxRoot}/orgs/ — no exact match and no task id ` +
+    `starts with it, so this id does not exist (not a truncation).`
+  );
+}
+
+/**
  * Update a task's status. Matches bash update-task.sh behavior, with the
  * cross-org fallback from findTaskFile so an assignee in one org can drive
  * the lifecycle of a task filed by an orchestrator in a sibling org.
@@ -267,9 +347,7 @@ export function updateTask(
 ): void {
   const filePath = findTaskFile(paths, taskId);
   if (!filePath) {
-    throw new Error(
-      `Task ${taskId} not found in any org under ${paths.ctxRoot}/orgs/`,
-    );
+    throw new Error(taskMissMessage(paths, taskId));
   }
   let prevStatus: TaskStatus | undefined;
   let assignee: string | undefined;
@@ -379,9 +457,7 @@ export function claimTask(
 ): Task {
   const filePath = findTaskFile(paths, taskId);
   if (!filePath) {
-    throw new Error(
-      `Task ${taskId} not found in any org under ${paths.ctxRoot}/orgs/`,
-    );
+    throw new Error(taskMissMessage(paths, taskId));
   }
 
   let task: Task;
@@ -466,9 +542,7 @@ export function completeTask(
 ): void {
   const filePath = findTaskFile(paths, taskId);
   if (!filePath) {
-    throw new Error(
-      `Task ${taskId} not found in any org under ${paths.ctxRoot}/orgs/`,
-    );
+    throw new Error(taskMissMessage(paths, taskId));
   }
   let prevStatus: TaskStatus | undefined;
   let assignee: string | undefined;

@@ -4,7 +4,7 @@ import { existsSync, readFileSync } from 'fs';
 import { join } from 'path';
 import { sendMessage, checkInbox, ackInbox } from '../bus/message.js';
 import { validateAgentName, validateTaskId } from '../utils/validate.js';
-import { createTask, updateTask, completeTask, claimTask, readTaskAudit, checkTaskDependencies, compactTasks, listTasks, checkStaleTasks, archiveTasks, checkHumanTasks } from '../bus/task.js';
+import { createTask, updateTask, completeTask, claimTask, getTask, taskMissMessage, readTaskAudit, checkTaskDependencies, compactTasks, listTasks, checkStaleTasks, archiveTasks, checkHumanTasks } from '../bus/task.js';
 import { saveOutput } from '../bus/save-output.js';
 import { logEvent } from '../bus/event.js';
 import { updateHeartbeat, readAllHeartbeats } from '../bus/heartbeat.js';
@@ -175,6 +175,21 @@ busCommand
       sendMessage(assigneePaths, env.agentName, opts.assignee, 'normal',
         `Task assigned: [${opts.priority}] ${title}${desc} (id: ${taskId})`);
     }
+  });
+
+busCommand
+  .command('get-task')
+  .description('Read-only single-task lookup by exact id (cross-org). Prints the full task JSON; never touches the task file, so updated_at is not disturbed. A truncated id gets a prefix-match hint instead of a bare not-found.')
+  .argument('<id>', 'Full task id (task_<epoch>_<digits>)')
+  .action((id: string) => {
+    const env = resolveEnv();
+    const paths = resolvePaths(env.agentName, env.instanceId, env.org);
+    const task = getTask(paths, id);
+    if (!task) {
+      console.error(taskMissMessage(paths, id));
+      process.exit(1);
+    }
+    console.log(JSON.stringify(task, null, 2));
   });
 
 busCommand

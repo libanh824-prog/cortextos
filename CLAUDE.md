@@ -12,7 +12,13 @@ npm test
 
 ## Before Submitting Changes
 
-1. `npm run build` — TypeScript must compile cleanly
+1. Compile check: `npx tsc --noEmit`. Do NOT run `npm run build` for routine
+   verification — it overwrites `dist/`, which is the LIVE CLI every agent's
+   bus scripts execute, silently deploying every unshipped src commit
+   fleet-wide. `npm run build` runs ONLY inside the dist-ship motion
+   (docs/runbooks/dist-ship.md: snapshot dist first, suite gate, live-verifies,
+   rollback path). An agent hit exactly this on 2026-08-25: reflex-built during
+   a small feature, live-deployed a 5-commit L-gated batch for ~3 minutes.
 2. `npm test` — all tests must pass. This project uses **vitest**: run a single
    file with `npm test -- <file>`, never `npx jest` — the bare `npx jest`
    invocation fails in babel AND silently downloads a ~120MB jest toolchain
