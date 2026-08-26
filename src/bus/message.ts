@@ -85,7 +85,7 @@ function appendToHistoryLog(ctxRoot: string, message: InboxMessage): void {
     // in the microseconds between write and fsync remains theoretically
     // possible (perfect append atomicity needs a per-record journal, which
     // this best-effort index does not warrant); the NUL-tolerant reader
-    // (analyst's scripts/lib/jsonl-read.sh) remains the belt to this brace.
+    // (the shared reader at bus/lib/jsonl-read.sh) remains the belt to this brace.
     // atomicWriteSync (temp+rename) is deliberately NOT used: rename-replace
     // on a shared append-only log would race concurrent appenders and drop
     // records.

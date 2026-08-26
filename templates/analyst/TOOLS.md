@@ -172,7 +172,7 @@ Measured on the command org, 2026-08-23: `jq` returned **2442** rows of **6048**
 
 ```bash
 # The reader is fleet-shared tooling maintained by the analyst agent:
-source "${CTX_FRAMEWORK_ROOT:?}/orgs/${CTX_ORG:?}/agents/analyst/scripts/lib/jsonl-read.sh"
+source "${CTX_FRAMEWORK_ROOT:?}/bus/lib/jsonl-read.sh"
 jsonl_read "$CTX_ROOT/logs/message-history.jsonl"      # rows on stdout, skip report on stderr
 JSONL_STRICT=1 jsonl_read "$file"                       # also exits 1 if anything was skipped
 ```
