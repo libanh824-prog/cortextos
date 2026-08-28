@@ -18,6 +18,7 @@
 import { existsSync, readFileSync } from 'fs';
 import { join } from 'path';
 import { atomicWriteSync, ensureDir } from '../utils/atomic.js';
+import { withFileLockSync } from '../utils/lock.js';
 
 export interface CronFireRecord {
   name: string;
@@ -59,29 +60,40 @@ export function updateCronFire(
   cronName: string,
   interval?: string,
 ): void {
+  // ensureDir runs BEFORE the lock: acquireLock creates its `.lock.d` inside
+  // stateDir, so the directory must already exist.
   ensureDir(stateDir);
-  const state = readCronState(stateDir);
-  const now = new Date().toISOString();
 
-  const idx = state.crons.findIndex(r => r.name === cronName);
-  const record: CronFireRecord = { name: cronName, last_fire: now, ...(interval ? { interval } : {}) };
+  // The read-modify-write runs under the per-agent stateDir lock so two
+  // concurrent callers can't lose each other's records, and the write itself
+  // goes through atomicWriteSync (tmp + rename) so a crash mid-write can never
+  // tear the file — a torn cron-state.json degrades to `{crons: []}` on read,
+  // dropping the last-fire references and risking duplicate catch-up fires.
+  withFileLockSync(stateDir, () => {
+    const state = readCronState(stateDir);
+    const now = new Date().toISOString();
 
-  if (idx === -1) {
-    state.crons.push(record);
-  } else {
-    // MERGE, never replace: a mark without --interval must not erase a
-    // previously declared cadence. The interval declaration is load-bearing
-    // for gap detection (daemon gap-nudge + the OOB watcher's S5); under the
-    // old whole-record replace, one flag-less fire silently un-declared it
-    // and both monitors went blind on that cron with nothing logged.
-    state.crons[idx] = { ...state.crons[idx], ...record };
-  }
+    const idx = state.crons.findIndex(r => r.name === cronName);
+    const record: CronFireRecord = { name: cronName, last_fire: now, ...(interval ? { interval } : {}) };
 
-  state.updated_at = now;
-  // Atomic: this file is the agent-side liveness witness that frozen-session
-  // detection trusts — a torn write here fabricates exactly the corruption
-  // that detection exists to catch.
-  atomicWriteSync(cronStatePath(stateDir), JSON.stringify(state, null, 2) + '\n');
+    if (idx === -1) {
+      state.crons.push(record);
+    } else {
+      // MERGE, never replace: a mark without --interval must not erase a
+      // previously declared cadence. The interval declaration is load-bearing
+      // for gap detection (daemon gap-nudge + the OOB watcher's S5); under the
+      // old whole-record replace, one flag-less fire silently un-declared it
+      // and both monitors went blind on that cron with nothing logged.
+      state.crons[idx] = { ...state.crons[idx], ...record };
+    }
+
+    state.updated_at = now;
+    // Atomic: this file is the agent-side liveness witness that frozen-session
+    // detection trusts — a torn write here fabricates exactly the corruption
+    // that detection exists to catch. (Our tree keeps the explicit '\n':
+    // on-disk bytes stay identical to what the live fleet writes today.)
+    atomicWriteSync(cronStatePath(stateDir), JSON.stringify(state, null, 2) + '\n');
+  });
 }
 
 /**
