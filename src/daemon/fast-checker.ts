@@ -169,16 +169,29 @@ export class FastChecker {
     let messageBlock = '';
     const ackIds: string[] = [];
 
-    // Process queued Telegram messages
-    let hasTelegramMessage = false;
+    // Process queued transport messages. Drain into local buffers rather than
+    // discarding outright — if injection fails (agent mid-restart, or deduped)
+    // we must re-queue, since these in-memory queues are the ONLY backing store
+    // for Telegram (no inbox-style ACK/redelivery). Mirrors the
+    // inbox ACK-after-inject recovery model below.
+    const drainedTelegram: typeof this.telegramMessages = [];
     while (this.telegramMessages.length > 0) {
       const msg = this.telegramMessages.shift()!;
       messageBlock += msg.formatted;
-      hasTelegramMessage = true;
+      drainedTelegram.push(msg);
     }
+    const hasTelegramMessage = drainedTelegram.length > 0;
 
-    // Check agent inbox
-    const inboxMessages = checkInbox(this.paths);
+    // Check agent inbox. A refused inbox lock throws InboxLockUnavailableError;
+    // keep independent transport delivery moving, but make the failure explicit
+    // in the daemon log — the next poll retries instead of claiming a
+    // successful empty inbox.
+    let inboxMessages: InboxMessage[] = [];
+    try {
+      inboxMessages = checkInbox(this.paths);
+    } catch (err) {
+      this.log(`Inbox check failed: ${err instanceof Error ? err.message : String(err)}`);
+    }
     for (const msg of inboxMessages) {
       messageBlock += this.formatInboxMessage(msg);
       ackIds.push(msg.id);
@@ -186,8 +199,12 @@ export class FastChecker {
 
     // Inject if there's anything
     if (messageBlock) {
-      const injected = this.agent.injectMessage(messageBlock);
-      if (injected) {
+      // The detailed result matters here: a bare boolean conflates NOT_RUNNING
+      // with DEDUPED, and re-queueing a DEDUPED batch would park it in the
+      // queue forever (every retry dedups again) or replay it later alongside
+      // new traffic. Only NOT_RUNNING is retriable.
+      const injected = this.agent.injectMessageDetailed(messageBlock);
+      if (injected.ok) {
         // ACK inbox messages
         for (const id of ackIds) {
           ackInbox(this.paths, id);
@@ -201,6 +218,20 @@ export class FastChecker {
         }
         // Cooldown after injection
         await sleep(5000);
+      } else if (injected.code === 'NOT_RUNNING' && drainedTelegram.length > 0) {
+        // Agent not running (mid-restart). Re-queue the drained transport
+        // messages at the FRONT so they are retried next cycle in original
+        // order. Inbox messages need no action — they were never ACK'd, so
+        // checkInbox redelivers them. Without this, inbound transport traffic
+        // during a restart is silently and permanently lost.
+        this.telegramMessages.unshift(...drainedTelegram);
+        const requeued = drainedTelegram.length;
+        this.log(`Inject failed (${injected.code}); re-queued ${requeued} transport message(s)`);
+      } else if (!injected.ok) {
+        // DEDUPED: an identical block was already injected — treat as
+        // delivered and drop the drained copies. Re-queueing would never
+        // succeed (each retry dedups again) and could replay the batch later.
+        this.log(`Inject skipped (${injected.code}); dropped duplicate transport batch`);
       }
     }
 
