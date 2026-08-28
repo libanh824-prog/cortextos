@@ -1,4 +1,4 @@
-import { appendFileSync, existsSync, readFileSync, statSync, unlinkSync, writeFileSync } from 'fs';
+import { appendFileSync, existsSync, readFileSync, renameSync, statSync, unlinkSync, writeFileSync } from 'fs';
 import { join, sep } from 'path';
 import { homedir } from 'os';
 import type { AgentConfig, AgentStatus, CtxEnv } from '../types/index.js';
@@ -113,8 +113,11 @@ export class AgentProcess {
       writeCortextosEnv(this.env.agentDir, this.env);
     }
 
-    // Determine start mode
-    const mode = this.shouldContinue() ? 'continue' : 'fresh';
+    // Determine start mode. CONSUME ONLY WHAT YOU HONOURED: one probe feeds
+    // the decision, the same observation authorises the post-spawn delete, and
+    // the delete is gated on that observation having actually selected `fresh`.
+    const observedForceFresh = this.probeForceFreshMarker();
+    const mode = this.shouldContinue(observedForceFresh) ? 'continue' : 'fresh';
     const prompt = mode === 'fresh'
       ? this.buildStartupPrompt()
       : this.buildContinuePrompt();
@@ -195,6 +198,12 @@ export class AgentProcess {
       this.status = 'running';
       this.sessionStart = new Date();
       this.log(`Running (pid: ${this.pty.getPid()})`);
+
+      // Consume the force-fresh marker only now that the spawn has succeeded —
+      // a spawn failure must leave the fresh-boot request armed for the retry.
+      // Gated on mode: a marker that did not select `fresh` was never honoured
+      // and must survive for the next start.
+      if (mode === 'fresh' && observedForceFresh) this.deleteForceFreshMarker(observedForceFresh);
 
       // Issue #392: codex-app-server does not reliably execute the inline
       // "Send a Telegram message saying you are back online" instruction the
@@ -723,22 +732,114 @@ export class AgentProcess {
     }, backoff);
   }
 
-  private shouldContinue(): boolean {
+  /**
+   * Probe for the `.force-fresh` marker WITHOUT consuming it, returning the
+   * IDENTITY of the file observed — not just whether one existed.
+   *
+   * The identity is load-bearing. Deferring the consume to after spawn opens a
+   * seconds-wide window in which another writer can replace the marker with a
+   * NEW fresh-boot request (the marker has multiple writers, some in separate
+   * CLI processes entirely). An unconditional post-spawn delete cannot tell
+   * that newer request apart from the one observed at mode decision, and
+   * swallows it — so the concurrent restart boots `--continue`, which is the
+   * very failure this deferral exists to prevent, reintroduced on a narrower
+   * window.
+   *
+   * Returns null when absent.
+   */
+  private probeForceFreshMarker(): { ino: number; mtimeMs: number; size: number } | null {
+    try {
+      const stat = statSync(join(this.env.ctxRoot, 'state', this.name, '.force-fresh'));
+      return { ino: Number(stat.ino), mtimeMs: stat.mtimeMs, size: stat.size };
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * Consume the `.force-fresh` marker. Call only after pty.spawn() succeeds.
+   *
+   * Consumes ONLY the exact file observed at probe time. If the marker on disk
+   * is a different file (replaced mid-spawn) it is LEFT IN PLACE, because it
+   * represents a request this launch did not satisfy.
+   *
+   * Tolerates an already-absent file: start() can be re-entered after a failed
+   * spawn, and the marker may have been consumed by an earlier successful one.
+   */
+  private deleteForceFreshMarker(observed: { ino: number; mtimeMs: number; size: number }): void {
+    const markerPath = join(this.env.ctxRoot, 'state', this.name, '.force-fresh');
+
+    // Atomically RESERVE whatever currently sits at the marker path before
+    // looking at it. A check-then-unlink here would be a TOCTOU: the marker's
+    // writers include hardRestart in a SEPARATE CLI process, whose write can
+    // land between an identity check and the unlink — and the unlink would
+    // then delete that new request, recreating the exact lost-request race
+    // the identity binding exists to prevent. renameSync is the atomic take:
+    // a concurrent replacement either lands BEFORE the rename (it gets swept
+    // into the reserve, detected by the identity check below, and restored)
+    // or AFTER (writeFileSync creates a fresh marker at the now-empty path,
+    // which this function never touches). Rename preserves ino/mtime/size, so
+    // the identity check works on the reserved file.
+    const reservePath = `${markerPath}.consumed.${process.pid}.${Date.now().toString(36)}`;
+    try {
+      renameSync(markerPath, reservePath);
+    } catch {
+      return; // marker already gone — consumed earlier or never present
+    }
+
+    let reserved: { ino: number; mtimeMs: number; size: number } | null = null;
+    try {
+      const st = statSync(reservePath);
+      reserved = { ino: Number(st.ino), mtimeMs: st.mtimeMs, size: st.size };
+    } catch { /* fall through to restore-or-drop below */ }
+
+    if (
+      reserved &&
+      reserved.ino === observed.ino &&
+      reserved.mtimeMs === observed.mtimeMs &&
+      reserved.size === observed.size
+    ) {
+      // Exactly the file this launch honoured — consume it.
+      try { unlinkSync(reservePath); } catch { /* inert leftover */ }
+      return;
+    }
+
+    // We swept a NEWER request (replaced after the mode-decision probe). Put
+    // it back for the next start — unless an even newer marker has already
+    // landed at the path, in which case the fresh-boot intent already stands
+    // and the swept copy is redundant.
+    this.log('.force-fresh changed during spawn — preserving the newer request for the next start');
+    try {
+      if (existsSync(markerPath)) unlinkSync(reservePath);
+      else renameSync(reservePath, markerPath);
+    } catch { /* best effort — a stray reserve file is inert */ }
+  }
+
+  private shouldContinue(
+    observedForceFresh: { ino: number; mtimeMs: number; size: number } | null,
+  ): boolean {
+    // Check for force-fresh marker FIRST (all runtimes honor it).
+    //
+    // Ordering matters: this check used to sit BELOW the Hermes early-return,
+    // which meant a `.force-fresh` armed on a Hermes agent was never honored
+    // (the agent kept resuming as long as state.db existed) AND never
+    // consumed, so it leaked in the state dir indefinitely.
+    //
+    // This is a PROBE ONLY — it must not consume the marker. The consume moved
+    // to start()'s post-spawn block. Consuming here spent the fresh-boot
+    // request at the MODE DECISION, well before pty.spawn(); any failure in
+    // between burned the marker, and the next start() then booted `--continue`
+    // into the exact session the marker existed to escape (e.g. the
+    // image-poison crash loop that arms the marker in handleExit).
+    if (observedForceFresh) {
+      return false;
+    }
+
     // Hermes: session continuity is determined by whether the SQLite DB exists.
     // HERMES_HOME env var overrides the default ~/.hermes path.
     if (this.config.runtime === 'hermes') {
       const hermesHome = process.env['HERMES_HOME'];
       return hermesDbExists(hermesHome);
-    }
-
-    // Check for force-fresh marker (all runtimes honor it).
-    const forceFreshPath = join(this.env.ctxRoot, 'state', this.name, '.force-fresh');
-    if (existsSync(forceFreshPath)) {
-      try {
-        const { unlinkSync } = require('fs');
-        unlinkSync(forceFreshPath);
-      } catch { /* ignore */ }
-      return false;
     }
 
     // codex-app-server: session continuity is tracked by the adapter's own
