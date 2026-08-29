@@ -60,3 +60,32 @@ alert_budget_ok() {
     '.[$k] = ($kept + [$now])' "$sf" > "$sf.tmp" 2>/dev/null && mv "$sf.tmp" "$sf"
   return 0
 }
+
+# ─── RE-CHECK NOTE ──────────────────────────────────────────────────────────
+# ★ WHY IT EXISTS (2026-08-28). An alert is evidence about DETECTION TIME, not about
+# now. Twice inside ten minutes on 2026-08-28, an orchestrator read a guard's alert,
+# reasoned forward from its text about what was wrong and what to do — and the owner
+# had already opened the artefact, fixed it and re-verified before the message
+# arrived. The guard notifies on detection, so its message and the fix CROSSED. For
+# any guard that alerts immediately, crossing is not an edge case: it is the normal
+# case for anything the owner is actively working, which is exactly the class of
+# thing that generates alerts.
+#
+# A finding named WITHOUT its re-check invites reasoning from the report instead of
+# from the state. So every alert carries the command that answers "is this still
+# true right now?", and the reader's first move is that command, not the prose.
+#
+# It lives here, next to alert_budget_ok, because every alerting guard already
+# sources this file — one definition, fifteen consumers, no new coupling and no
+# re-typed string to drift. Audited by check-guard-contract.sh (RE-CHECK axis);
+# a guard that genuinely should not carry one declares
+#   # GUARD-CONTRACT: no-recheck-note <reason>
+# at the top, because a documented exemption is checkable and a remembered one is not.
+#
+# CONTRACT. recheck_note [path]  -> prints the line on stdout. Never fails, never
+# sends. Callers append it to the alert body they were going to send anyway.
+recheck_note() {
+  local g="${1:-${BASH_SOURCE[1]:-}}"
+  [ -n "$g" ] && g="$(basename -- "$g")" || g="this guard"
+  printf 'RE-CHECK NOW: %s — this describes the state when the check ran, which may not be the state now; the owner may already have moved.' "$g"
+}
