@@ -76,7 +76,16 @@ print(best)' 2>/dev/null)
   printf '{"announced_after":"%s","gap_s":%s,"announced_at":"%s"}\n' \
     "$newest" "$gap_s" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$statefile" 2>/dev/null
 
-  echo "resume-gap[$label]: NOT RUNNING for ${gap_h}h — newest row $newest, nominal cadence $((nominal_s/60))m. Nothing observed this stretch; it is excluded from rates, not measured."
+  # ★ NAME THE SERIES THE CLAIM IS ABOUT (2026-08-29). The two BLIND paths above already
+  # say which file they read; this one did not. chief ran an analyst guard from HIS env,
+  # the caller resolved $series to a different state dir whose newest row was six weeks
+  # old, and this line announced "NOT RUNNING for 1099h" with NOTHING in the text saying
+  # WHICH file that was a claim about — while the real series had rows from a minute ago.
+  # He could only diagnose it because he happened to know the live log was current.
+  # A claim must carry what the reader needs to check it, and for a not-running claim the
+  # thing to check is the path. Same defect the memory-index guard had the same day,
+  # saying "the on-demand sub-index" over an index that linked two.
+  echo "resume-gap[$label]: NOT RUNNING for ${gap_h}h — newest row $newest in $series, nominal cadence $((nominal_s/60))m. Nothing observed this stretch; it is excluded from rates, not measured. If that path is not the series you expected, this is a wrong-state-dir read, not a gap."
 
   if command -v cortextos >/dev/null 2>&1; then
     cortextos bus log-event action resume_gap warn \
