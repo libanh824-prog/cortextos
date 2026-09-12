@@ -86,8 +86,8 @@ SCHEMAS = {
     "ram_series": [
         "claude_procs", "claude_rss_each_mb", "claude_rss_total_mb",
         "mem_avail_mb", "mem_free_mb", "mem_total_mb", "mem_used_mb",
-        "other_mb", "postgres_procs", "postgres_rss_total_mb", "swap_total_mb",
-        "swap_used_mb", "ts", "vscode_rss_total_mb",
+        "other_mb", "postgres_procs", "postgres_rss_total_mb", "swap_cached_mb",
+        "swap_total_mb", "swap_used_mb", "ts", "vscode_rss_total_mb",
     ],
     "disk_series": [
         "free_mb", "inodes_free", "inodes_free_pct", "inodes_total",
