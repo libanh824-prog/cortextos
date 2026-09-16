@@ -73,7 +73,7 @@ class MissingInRow(KeyError):
 # Measured 2026-09-02 from the live stores.  Union of every observed shape.
 SCHEMAS = {
     "task": [
-        "archived", "assigned_to", "completed_at", "created_at", "created_by",
+        "archived", "assigned_to", "blocked_reason", "completed_at", "created_at", "created_by",
         "description", "due_date", "id", "kpi_key", "needs_approval", "org",
         "outputs", "priority", "project", "result", "status", "title", "type",
         "updated_at",
