@@ -100,7 +100,8 @@ type RuntimeCase = {
 const CASES: RuntimeCase[] = [
   { runtime: 'claude-code',      expectedFloorMs: 6000, expectedCeilingMs: 10000, expectedWrites: ['\x03', '/exit\r\n'] },
   { runtime: 'hermes',           expectedFloorMs: 3000, expectedCeilingMs: 7000,  expectedWrites: ['\x04'] },
-  { runtime: 'opencode',         expectedFloorMs: 1000, expectedCeilingMs: 5000,  expectedWrites: ['\x03'] },
+  // (fork) no 'opencode' row: this tree ships no opencode runtime (upstream #699/#927 not adopted),
+  // so runtime 'opencode' has no branch of its own and falls to the claude-code default path.
   {
     runtime: 'codex-app-server', expectedFloorMs: 0,    expectedCeilingMs: 250,   expectedWrites: [],
     // ⛔ THIS ROW PROVES NOTHING ON ITS OWN AND MUST NOT BE COUNTED AS EVIDENCE.
