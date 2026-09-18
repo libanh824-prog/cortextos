@@ -127,8 +127,15 @@ busCommand
   .action(() => {
     const env = resolveEnv();
     const paths = resolvePaths(env.agentName, env.instanceId, env.org);
-    const messages = checkInbox(paths);
-    console.log(JSON.stringify(messages));
+    // An unavailable inbox lock must exit nonzero with an error — printing []
+    // would be indistinguishable from a successfully-read empty inbox.
+    try {
+      const messages = checkInbox(paths);
+      console.log(JSON.stringify(messages));
+    } catch (err) {
+      console.error(`check-inbox failed: ${err instanceof Error ? err.message : String(err)}`);
+      process.exitCode = 1;
+    }
   });
 
 busCommand
