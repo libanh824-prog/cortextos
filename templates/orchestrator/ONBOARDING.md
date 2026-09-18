@@ -151,7 +151,7 @@ cortextos bus list-crons $CTX_AGENT_NAME
 ```bash
 cortextos bus add-cron $CTX_AGENT_NAME heartbeat 4h Read HEARTBEAT.md and follow its instructions. Update your heartbeat, check inbox, review agent health via cortextos bus read-all-heartbeats, and work on coordination tasks.
 
-cortextos bus add-cron $CTX_AGENT_NAME approval-sweep 2h Check for pending approvals: cortextos bus list-approvals --format json. Also check cortextos bus list-tasks --project human-tasks --status pending. For any pending approval or human task older than 1h, send user a Telegram reminder.
+cortextos bus add-cron $CTX_AGENT_NAME approval-sweep 2h Check for pending approvals: cortextos bus list-approvals --format json. Also check cortextos bus list-tasks --status pending --format json, then filter client-side for project==human-tasks or '[HUMAN]' in the title (there is NO --project flag on list-tasks; an 'unknown option' error is a HARD STOP, never an empty result). For any pending approval or human task older than 1h, send user a Telegram reminder.
 ```
 
 **Time-anchored crons** — compute hours from context.json, then register:

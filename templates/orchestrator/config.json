@@ -25,7 +25,7 @@
       "name": "check-approvals",
       "type": "recurring",
       "interval": "2h",
-      "prompt": "Check for pending approvals and human tasks. (1) cortextos bus list-approvals --format json — for any pending approval older than 1h, send user a Telegram reminder. (2) cortextos bus list-tasks --project human-tasks --status pending — for any [HUMAN] task pending >4h, send user a Telegram reminder with the task title and what's blocked. ACK any approval/human-task inbox messages."
+      "prompt": "Check for pending approvals and human tasks. (1) cortextos bus list-approvals --format json — for any pending approval older than 1h, send user a Telegram reminder. (2) cortextos bus list-tasks --status pending --format json, then filter client-side for project==human-tasks or '[HUMAN]' in the title (there is NO --project flag on list-tasks; if any command errors with 'unknown option' that is a HARD STOP, never an empty result) — for any [HUMAN] task pending >4h, send user a Telegram reminder with the task title and what's blocked. ACK any approval/human-task inbox messages."
     },
     {
       "name": "morning-review",
