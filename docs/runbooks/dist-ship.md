@@ -46,6 +46,32 @@ before the ship, not skipped)
 - 51a1ab2: `cortextos bus get-task <any real id>` prints full JSON and the
   task file's mtime is unchanged; a truncated id exits 1 saying TRUNCATED
   with the full-id candidates.
+- 96f330c: on the shipping agent's OWN cron-state
+  (`~/.cortextos/<inst>/state/<agent>/cron-state.json`), read the
+  `interval` of a cron that has one (dev: `heartbeat-tick` = 30m), run the
+  flag-less `cortextos bus update-cron-fire heartbeat-tick`, read again:
+  `interval` is UNCHANGED (old dist: erased → the gap monitors go blind on
+  that cron). Positive control: `--interval 30m` still writes it. Then
+  confirm the file is byte-parseable (`jq . cron-state.json >/dev/null`) —
+  the atomic-write half. The extra mark is harmless (a real fire time).
+- 5d2cde3: src delta is ONE comment line in `src/bus/message.ts` (proven:
+  `git show --format= 5d2cde3 -- src | grep '^[-+]' | grep -v '^[-+][-+]'`
+  shows only the comment); no runtime check. Its bus/lib/*.sh + TOOLS.md
+  parts are read from disk and were live at commit time.
+- PR #1 (feat/upstream-tier-a-pr1 — a15baad fdfaa78 28500e7 af58ef8 756b931
+  f1b8aad + 7e79e12 comment): CLI half right after the build —
+  `cortextos bus list-tasks` shows full 27-char ids; `cortextos bus
+  complete-task bogus-id` exits 1 with ONE stderr line, no stack; `cortextos
+  status` renders with a model column. DAEMON half only after
+  `pm2 restart cortextos-daemon` (dist/daemon.js keeps loaded code until
+  then — this batch is the FIRST that touches daemon runtime; all 4 agents
+  soft-restart with --continue, no L ping per banked rule): `cortextos
+  status` shows no `unhealthy*` on a healthy agent; hand-edit a prompt in a
+  test cron in crons.json → the next fire carries the new text within one
+  tick with NO IPC poke (af58ef8); an inbound Telegram to an idle agent does
+  NOT advance its heartbeat.json last_heartbeat while its own `bus log-event`
+  does (28500e7). Rollback for this batch = restore snapshot AND restart the
+  daemon again, so the old daemon code is what runs.
 
 ## Rollback (any live-verify failure)
 5. `rm -rf dist && mv dist.pre-<date> dist` — restores the exact prior
