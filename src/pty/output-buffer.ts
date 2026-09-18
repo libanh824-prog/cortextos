@@ -108,6 +108,15 @@ export class OutputBuffer {
       if (cleaned.includes('trust') && !cleaned.includes('> ')) {
         return false;
       }
+      // KNOWN GAP (fresh-eyes review of PR #1, 2026-09-18): there is NO matching
+      // false-positive guard for the "Bypass Permissions" first-run screen. The
+      // match below is case-sensitive and today's screen renders title-case
+      // "Permissions", so it does not trip — but if a future Claude Code TUI
+      // renders lowercase "permissions" there, this returns true before the
+      // auto-accept poll in agent-pty.ts reaches its bypass branch: Down+Enter is
+      // never sent AND the awaitingConfirmation backstop (also !isBootstrapped)
+      // stays silent, so the wedge shows as "running". Hardening (screen
+      // discrimination, not just casing) is a separate tracked item.
     }
 
     return cleaned.includes(this.bootstrapPattern);
