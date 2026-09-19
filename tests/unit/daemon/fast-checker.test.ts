@@ -986,6 +986,30 @@ describe('FastChecker', () => {
       }
     });
 
+    it('NOT_RUNNING with an inbox-only block logs the un-ACKed inbox count, not "dropped duplicate"', async () => {
+      const agent = createMockAgent();
+      agent.injectMessageDetailed.mockReturnValue({ ok: false, code: 'NOT_RUNNING', message: 'mid-restart' });
+      const log = vi.fn();
+      const checker = new FastChecker(agent, paths, '/tmp/framework', { log }) as any;
+
+      // One inbox message, NO transport traffic — the drained Telegram list is empty.
+      writeFileSync(join(paths.inbox, 'm-inbox-1.json'), JSON.stringify({
+        id: 'm-inbox-1', from: 'chief', to: 'test-agent', priority: 'normal',
+        text: 'hello during restart', timestamp: new Date().toISOString(),
+      }));
+
+      await checker.pollCycle();
+
+      // Before the fix this fell through to the DEDUPED branch and read as a drop.
+      const lines = log.mock.calls.map((c: unknown[]) => String(c[0]));
+      expect(lines.some(l => l.includes('dropped duplicate transport batch'))).toBe(false);
+      expect(lines.some(l => l.includes('Inject failed (NOT_RUNNING)') && l.includes('1 inbox message(s) left un-ACKed'))).toBe(true);
+      // The inbox message survives for redelivery (never ACKed): checkInbox moves
+      // it to inflight on read; only an ACK moves it to processed.
+      expect(existsSync(join(paths.inflight, 'm-inbox-1.json'))).toBe(true);
+      expect(existsSync(join(paths.processed, 'm-inbox-1.json'))).toBe(false);
+    });
+
     it('drains the queues (no re-queue) when inject succeeds', async () => {
       vi.useFakeTimers();
       try {
