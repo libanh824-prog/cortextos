@@ -218,16 +218,25 @@ export class FastChecker {
         }
         // Cooldown after injection
         await sleep(5000);
-      } else if (injected.code === 'NOT_RUNNING' && drainedTelegram.length > 0) {
+      } else if (injected.code === 'NOT_RUNNING') {
         // Agent not running (mid-restart). Re-queue the drained transport
         // messages at the FRONT so they are retried next cycle in original
         // order. Inbox messages need no action — they were never ACK'd, so
         // checkInbox redelivers them. Without this, inbound transport traffic
         // during a restart is silently and permanently lost.
+        //
+        // Branch on the CODE first, then on what was drained: an inbox-only
+        // block that fails NOT_RUNNING used to fall through to the DEDUPED log
+        // line below and read as "dropped duplicate transport batch" — a
+        // misattribution (nothing was dropped; the inbox redelivers).
         this.telegramMessages.unshift(...drainedTelegram);
         const requeued = drainedTelegram.length;
-        this.log(`Inject failed (${injected.code}); re-queued ${requeued} transport message(s)`);
-      } else if (!injected.ok) {
+        if (requeued > 0) {
+          this.log(`Inject failed (${injected.code}); re-queued ${requeued} transport message(s)`);
+        } else {
+          this.log(`Inject failed (${injected.code}); ${ackIds.length} inbox message(s) left un-ACKed for redelivery`);
+        }
+      } else {
         // DEDUPED: an identical block was already injected — treat as
         // delivered and drop the drained copies. Re-queueing would never
         // succeed (each retry dedups again) and could replay the batch later.
