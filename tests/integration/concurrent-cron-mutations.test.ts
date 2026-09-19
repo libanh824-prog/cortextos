@@ -91,11 +91,21 @@ function seedCrons(agent: string, count: number): string[] {
   return names;
 }
 
+// The CLI's post-write reload signal resolves the daemon IPC socket from
+// CTX_INSTANCE_ID (getIpcPath: ~/.cortextos/<instance>/daemon.sock), NOT from
+// CTX_ROOT. With only CTX_ROOT sandboxed, every child here sent a real
+// `reload-crons race-agent` to the LIVE fleet daemon (observed 2026-09-18: 160
+// such lines in the running daemon's log across four suite runs). Point the
+// instance at one that cannot exist so the signal fails closed (the CLI treats a
+// missing socket as non-fatal) and the suite never touches the running fleet.
+const SANDBOX_INSTANCE = `vitest-${process.pid}`;
+const childEnv = () => ({ ...process.env, CTX_ROOT: tmpRoot, CTX_INSTANCE_ID: SANDBOX_INSTANCE });
+
 async function runUpdate(agent: string, name: string, newPrompt: string): Promise<void> {
   await execFileAsync(
     process.execPath,
     [DIST_CLI, 'bus', 'update-cron', agent, name, '--prompt', newPrompt],
-    { env: { ...process.env, CTX_ROOT: tmpRoot } },
+    { env: childEnv() },
   );
 }
 
