@@ -10,6 +10,8 @@ node_modules
 !templates/**/.claude/
 !templates/**/.claude/**
 dist/
+# dist-ship rollback snapshots (docs/runbooks/dist-ship.md step 3) — transient, never versioned
+dist.pre-*/
 ecosystem.config.js
 
 # User-created org data (not part of the framework)
