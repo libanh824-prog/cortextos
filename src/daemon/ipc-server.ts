@@ -3,7 +3,7 @@ import { existsSync, unlinkSync, chmodSync, readFileSync } from 'fs';
 import { join, resolve as pathResolve } from 'path';
 import type { IPCRequest, IPCResponse, CronSummaryRow, CronDefinition } from '../types/index.js';
 import { AgentManager } from './agent-manager.js';
-import { getIpcPath } from '../utils/paths.js';
+import { getIpcPath, sandboxedRootMismatch } from '../utils/paths.js';
 import { readCrons, getExecutionLog, getExecutionLogPage, addCron, updateCron, removeCron, getCronByName } from '../bus/crons.js';
 import type { ExecutionLogStatusFilter } from '../bus/crons.js';
 import { nextFireFromCron } from './cron-scheduler.js';
@@ -477,10 +477,12 @@ export function handleRemoveCron(
 export class IPCServer {
   private server: Server | null = null;
   private socketPath: string;
+  private readonly instanceId: string;
   private agentManager: AgentManager;
 
   constructor(agentManager: AgentManager, instanceId: string = 'default') {
     this.agentManager = agentManager;
+    this.instanceId = instanceId;
     this.socketPath = getIpcPath(instanceId);
   }
 
@@ -488,6 +490,16 @@ export class IPCServer {
    * Start listening for IPC connections.
    */
   async start(): Promise<void> {
+    // Sandbox guard — BEFORE the unlink below, which is the destructive line:
+    // binding here would first delete the live daemon's socket, taking the whole
+    // fleet's CLI off IPC until it restarts. Refuse when CTX_ROOT points away
+    // from the instance this socket belongs to. No-op in production.
+    const mismatch = sandboxedRootMismatch(this.instanceId);
+    if (mismatch) {
+      console.error(`[ipc-server] refusing to listen on ${this.socketPath}: ${mismatch}`);
+      throw new Error(mismatch);
+    }
+
     // Clean up stale socket
     if (process.platform !== 'win32' && existsSync(this.socketPath)) {
       try {
@@ -873,8 +885,10 @@ export class IPCServer {
  */
 export class IPCClient {
   private socketPath: string;
+  private readonly instanceId: string;
 
   constructor(instanceId: string = 'default') {
+    this.instanceId = instanceId;
     this.socketPath = getIpcPath(instanceId);
   }
 
@@ -882,6 +896,16 @@ export class IPCClient {
    * Send a command to the daemon and get the response.
    */
   async send(request: IPCRequest): Promise<IPCResponse> {
+    // Sandbox guard — a process whose state lives under a redirected CTX_ROOT
+    // must not command the daemon that serves a different root. Logged as well as
+    // thrown: the main caller (signalCronReload) swallows errors by design, so a
+    // silent throw would be an invisible suppression. No-op in production.
+    const mismatch = sandboxedRootMismatch(this.instanceId);
+    if (mismatch) {
+      console.error(`[ipc-client] refusing to send ${request.type} to ${this.socketPath}: ${mismatch}`);
+      throw new Error(mismatch);
+    }
+
     const { createConnection } = require('net');
 
     return new Promise((resolve, reject) => {
