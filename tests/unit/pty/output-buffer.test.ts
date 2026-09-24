@@ -11,7 +11,7 @@ vi.mock('fs', async () => {
   };
 });
 
-const { OutputBuffer } = await import('../../../src/pty/output-buffer');
+const { OutputBuffer, isShowingBypassScreen } = await import('../../../src/pty/output-buffer');
 
 // Synthetic JWT used across tests. Has the canonical 3-segment shape and
 // the `eyJ` header prefix so the redactor matches it. Length exceeds the
@@ -112,5 +112,110 @@ describe('OutputBuffer redaction', () => {
     const written = String(appendFileSyncMock.mock.calls[0][1]);
     expect(written).toContain(shortTokenLike);
     expect(written).not.toContain('[REDACTED_JWT]');
+  });
+});
+
+describe('OutputBuffer bootstrap guards — Bypass Permissions screen', () => {
+  // Realistic fixtures. The status bar is the REAL one from the suite above:
+  // it literally reads "permissions: bypass", which is why the guard below must
+  // key on three co-occurring tokens — anything keyed on "bypass" alone would
+  // suppress bootstrap for every healthy agent.
+  const STATUS_BAR =
+    '\x1b[2m ? \x1b[0mfor shortcuts                  permissions: bypass\n';
+  // Hypothetical future TUI that renders the screen's heading in LOWERCASE.
+  // That casing is the whole hazard: it satisfies the bootstrap match.
+  const BYPASS_SCREEN_LOWERCASE =
+    'WARNING: Claude Code running in bypass permissions mode\n' +
+    '\x1b[1mIn bypass permissions mode, Claude Code will not ask for approval.\x1b[0m\n' +
+    '  1. No, exit\n' +
+    '  2. Yes, I accept\n';
+  // Today's screen: title-case heading, so the bootstrap pattern never matches it.
+  const BYPASS_SCREEN_TITLECASE =
+    'WARNING: Bypass Permissions mode\n  1. No, exit\n  2. Yes, I accept\n';
+
+  it('positive control: the real status bar reads as bootstrapped', () => {
+    const buf = new OutputBuffer(1000, '/tmp/fake-stdout.log');
+    buf.push(STATUS_BAR);
+    expect(buf.isBootstrapped()).toBe(true);
+  });
+
+  it('a lowercase bypass screen does NOT read as bootstrapped (the closed gap)', () => {
+    const buf = new OutputBuffer(1000, '/tmp/fake-stdout.log');
+    buf.push(BYPASS_SCREEN_LOWERCASE);
+    // Pre-fix this returned TRUE: "bypass permissions mode" contains the
+    // bootstrap pattern, so the auto-accept poll stops before sending Down+Enter
+    // and the awaitingConfirmation backstop stays silent — a wedge reported as
+    // "running". This assertion is the mutation check: delete the guard in
+    // output-buffer.ts and it fails.
+    expect(buf.isBootstrapped()).toBe(false);
+  });
+
+  it("today's title-case screen is not bootstrapped either", () => {
+    const buf = new OutputBuffer(1000, '/tmp/fake-stdout.log');
+    buf.push(BYPASS_SCREEN_TITLECASE);
+    expect(buf.isBootstrapped()).toBe(false);
+  });
+
+  it('agent output merely DISCUSSING bypass+accept stays bootstrapped', () => {
+    // The false-positive direction, which is the harmful one: suppressing
+    // bootstrap on a live agent stops message injection entirely. Two tokens
+    // are reachable in ordinary text; the screen's numbered default is not.
+    // Evaluated in ONE call with nothing bootstrapped beforehand, so the latch
+    // cannot be what saves it — this asserts the THRESHOLD. Loosen the guard to
+    // two tokens and this fails.
+    const buf = new OutputBuffer(1000, '/tmp/fake-stdout.log');
+    buf.push(STATUS_BAR);
+    buf.push('I had to bypass the check before the reviewer would accept the PR.\n');
+    expect(buf.isBootstrapped()).toBe(true);
+  });
+
+  it('pre-boot output discussing bypass+accept does not block the status bar', () => {
+    // Same threshold assertion with the discussion arriving FIRST, so the very
+    // first isBootstrapped() call sees permissions + bypass + accept together.
+    const buf = new OutputBuffer(1000, '/tmp/fake-stdout.log');
+    buf.push('Reviewer note: we bypass the gate only when L and Ali both accept.\n');
+    buf.push(STATUS_BAR);
+    expect(buf.isBootstrapped()).toBe(true);
+  });
+
+  it('once bootstrapped, a bypass-shaped screen cannot un-bootstrap the session', () => {
+    // The latch. Bounds any future false positive to the pre-boot window.
+    const buf = new OutputBuffer(1000, '/tmp/fake-stdout.log');
+    buf.push(STATUS_BAR);
+    expect(buf.isBootstrapped()).toBe(true);
+    buf.push(BYPASS_SCREEN_LOWERCASE);
+    expect(buf.isBootstrapped()).toBe(true);
+  });
+
+  it('once bootstrapped, trust-shaped output cannot un-bootstrap the session', () => {
+    // Same latch, applied to the pre-existing trust guard — which had the same
+    // latent exposure to live output containing "trust".
+    const buf = new OutputBuffer(1000, '/tmp/fake-stdout.log');
+    buf.push(STATUS_BAR);
+    expect(buf.isBootstrapped()).toBe(true);
+    buf.push('Do you trust the upstream maintainer?\n');
+    expect(buf.isBootstrapped()).toBe(true);
+  });
+
+  it('the guard is scoped to the permissions pattern — Hermes is untouched', () => {
+    const buf = new OutputBuffer(1000, '/tmp/fake-stdout.log', '❯');
+    buf.push(BYPASS_SCREEN_LOWERCASE);
+    expect(buf.isBootstrapped()).toBe(false); // no prompt char yet
+    buf.push('❯ ');
+    expect(buf.isBootstrapped()).toBe(true);  // prompt char wins regardless
+  });
+});
+
+describe('isShowingBypassScreen threshold', () => {
+  it('requires all three co-occurring tokens', () => {
+    expect(isShowingBypassScreen('bypass permissions mode')).toBe(false);
+    expect(isShowingBypassScreen('bypass ... I accept')).toBe(false);
+    expect(isShowingBypassScreen('1. No, exit  2. Yes, I accept')).toBe(false);
+    expect(isShowingBypassScreen('Bypass Permissions\n1. No, exit\n2. Yes, I accept')).toBe(true);
+  });
+
+  it('is case- and spacing-insensitive on the conjunction', () => {
+    expect(isShowingBypassScreen('BYPASS / ACCEPT / NO,EXIT')).toBe(true);
+    expect(isShowingBypassScreen('bypass accept no,   exit')).toBe(true);
   });
 });
