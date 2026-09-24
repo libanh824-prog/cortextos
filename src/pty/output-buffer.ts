@@ -14,6 +14,41 @@ async function loadStripAnsi() {
 const MAX_LOG_BYTES = 50 * 1024 * 1024; // 50 MB — rotate before OS file-cache pressure builds
 
 /**
+ * STRICT discrimination of the Claude Code "Bypass Permissions" first-run screen,
+ * for use as a false-positive guard on `isBootstrapped()`.
+ *
+ * Deliberately stricter than `AgentPTY.detectFirstRunPrompt`, which drives the
+ * auto-accept keystroke, because THE TWO CONSUMERS FAIL IN OPPOSITE DIRECTIONS
+ * over the same text and so must not share a threshold:
+ *
+ *   - auto-accept ("should I press Down+Enter?") — a false NEGATIVE wedges first
+ *     boot, a false positive is harmless (the write is bootstrap-gated, fires once,
+ *     and stops the poll). Permissive is correct there.
+ *   - this guard ("is the agent NOT up yet?") — a false POSITIVE suppresses
+ *     bootstrap for a RUNNING agent, which stops message injection entirely.
+ *     Strict is correct here.
+ *
+ * Hence three CO-OCCURRING tokens including the screen's numbered default option,
+ * not the two that are enough to justify a keystroke. Live agent output discusses
+ * these screens by name — this file's own history does — so "bypass" plus "accept"
+ * is reachable in ordinary conversation text; "1. No, exit" alongside both is not.
+ *
+ * Case-insensitive on purpose: the point is the CONJUNCTION, not the casing. Today's
+ * screen renders title-case "Permissions", so `isBootstrapped` never matches it and
+ * this guard is inert; it exists so a future TUI that renders lowercase cannot turn
+ * the status-bar match into a silent wedge.
+ *
+ * @param cleaned ANSI-stripped recent output.
+ */
+export function isShowingBypassScreen(cleaned: string): boolean {
+  return (
+    /bypass/i.test(cleaned) &&
+    /accept/i.test(cleaned) &&
+    /no,\s*exit/i.test(cleaned)
+  );
+}
+
+/**
  * Ring buffer for PTY output. Replaces tmux capture-pane.
  * Stores raw output chunks and provides search/retrieval with ANSI stripping.
  */
@@ -22,6 +57,15 @@ export class OutputBuffer {
   private maxChunks: number;
   private logPath: string | null;
   private bootstrapPattern: string;
+  /**
+   * Latched once the bootstrap pattern has matched for real. Both first-run
+   * guards below are then permanently disarmed: a trust or bypass screen cannot
+   * legitimately reappear after the status bar has once shown, so leaving the
+   * guards live for the life of the session only creates a way for ordinary
+   * agent output to un-bootstrap a running agent. One OutputBuffer is created
+   * per PTY spawn, so this resets with the session, as it should.
+   */
+  private everMatchedBootstrap = false;
 
   constructor(maxChunks: number = 1000, logPath?: string, bootstrapPattern?: string) {
     this.maxChunks = maxChunks;
@@ -101,25 +145,31 @@ export class OutputBuffer {
   isBootstrapped(): boolean {
     const recent = this.getRecent();
     const cleaned = recent.replace(/\x1b\[[0-9;]*[a-zA-Z]/g, '');
+    const matched = cleaned.includes(this.bootstrapPattern);
 
-    if (this.bootstrapPattern === 'permissions') {
+    // First-run false-positive guards. Skipped once bootstrap has genuinely
+    // matched (see everMatchedBootstrap) so they can only ever suppress DURING
+    // first boot, never for a live session.
+    if (this.bootstrapPattern === 'permissions' && !this.everMatchedBootstrap) {
       // Claude Code: exclude trust-folder prompt false positives.
       // The trust prompt shows "trust this folder" before the status bar appears.
       if (cleaned.includes('trust') && !cleaned.includes('> ')) {
         return false;
       }
-      // KNOWN GAP (fresh-eyes review of PR #1, 2026-09-18): there is NO matching
-      // false-positive guard for the "Bypass Permissions" first-run screen. The
-      // match below is case-sensitive and today's screen renders title-case
-      // "Permissions", so it does not trip — but if a future Claude Code TUI
-      // renders lowercase "permissions" there, this returns true before the
-      // auto-accept poll in agent-pty.ts reaches its bypass branch: Down+Enter is
-      // never sent AND the awaitingConfirmation backstop (also !isBootstrapped)
-      // stays silent, so the wedge shows as "running". Hardening (screen
-      // discrimination, not just casing) is a separate tracked item.
+      // Bypass Permissions screen (closes the KNOWN GAP left by PR #1's
+      // fresh-eyes review): while it shows, the agent is NOT up. Without this,
+      // a future lowercase "permissions" on that screen would satisfy the match
+      // below, the auto-accept poll in agent-pty.ts would clear itself before
+      // reaching its bypass branch so Down+Enter is never sent, AND the
+      // awaitingConfirmation backstop (also gated on !isBootstrapped) would stay
+      // silent — the wedge would report as "running".
+      if (isShowingBypassScreen(cleaned)) {
+        return false;
+      }
     }
 
-    return cleaned.includes(this.bootstrapPattern);
+    if (matched) this.everMatchedBootstrap = true;
+    return matched;
   }
 
   /**
