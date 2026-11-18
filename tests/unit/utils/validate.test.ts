@@ -404,7 +404,10 @@ describe('sanitizeForPtyInjection (Hoffman fence-injection disclosure)', () => {
 
       // Non-vacuous guard: the scan must actually see the known injection headers,
       // or a broken path/regex would green with an empty result.
-      for (const known of ['AGENT MESSAGE', 'BUZZ', 'SLACK', 'REACTION', 'URGENT SIGNAL']) {
+      // Our tree ships no Buzz/Slack transport (upstream Tier C, not adopted), so
+      // those headers are never EMITTED here. They stay in the closed set
+      // (harmless), but asserting the scan FINDS them would be false in this tree.
+      for (const known of ['AGENT MESSAGE', 'TELEGRAM', 'REACTION', 'URGENT SIGNAL']) {
         expect(found.has(known)).toBe(true);
       }
 

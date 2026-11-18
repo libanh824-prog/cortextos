@@ -90,9 +90,10 @@ export function updateCronFire(
     state.updated_at = now;
     // Atomic: this file is the agent-side liveness witness that frozen-session
     // detection trusts — a torn write here fabricates exactly the corruption
-    // that detection exists to catch. (Our tree keeps the explicit '\n':
-    // on-disk bytes stay identical to what the live fleet writes today.)
-    atomicWriteSync(cronStatePath(stateDir), JSON.stringify(state, null, 2) + '\n');
+    // that detection exists to catch. atomicWriteSync appends the trailing
+    // '\n' itself. (Our pre-merge code ALSO appended one, so live files end
+    // "}\n\n"; from this change they end "}\n" — still valid JSON, same parse.)
+    atomicWriteSync(cronStatePath(stateDir), JSON.stringify(state, null, 2));
   });
 }
 
